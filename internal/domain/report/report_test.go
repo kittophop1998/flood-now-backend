@@ -21,8 +21,8 @@ func TestNewReportInputValidate(t *testing.T) {
 		}
 	})
 
-	t.Run("every category is valid", func(t *testing.T) {
-		for _, ty := range validTypes {
+	t.Run("every creatable category is valid", func(t *testing.T) {
+		for _, ty := range creatableTypes {
 			in := valid()
 			in.Type = Type(ty)
 			if err := in.Validate(); err != nil {
@@ -32,14 +32,17 @@ func TestNewReportInputValidate(t *testing.T) {
 	})
 
 	cases := map[string]func(*NewReportInput){
-		"invalid type":           func(in *NewReportInput) { in.Type = "not-a-type" },
-		"legacy road_blocked":    func(in *NewReportInput) { in.Type = "road_blocked" },
-		"invalid severity":       func(in *NewReportInput) { in.Severity = "impassable" },
-		"out of range latitude":  func(in *NewReportInput) { in.Latitude = 91 },
-		"out of range longitude": func(in *NewReportInput) { in.Longitude = -181 },
-		"non-point geometry":     func(in *NewReportInput) { in.GeometryType = GeometryArea },
-		"negative water level":   func(in *NewReportInput) { v := -5; in.WaterLevelCM = &v },
-		"invalid water depth":    func(in *NewReportInput) { d := WaterDepth("waist"); in.WaterDepth = &d },
+		"invalid type":             func(in *NewReportInput) { in.Type = "not-a-type" },
+		"legacy road_blocked":      func(in *NewReportInput) { in.Type = "road_blocked" },
+		"sos-only vehicle_stalled": func(in *NewReportInput) { in.Type = TypeVehicleStalled },
+		"sos-only help_needed":     func(in *NewReportInput) { in.Type = TypeHelpNeeded },
+		"sos-only other":           func(in *NewReportInput) { in.Type = TypeOther },
+		"invalid severity":         func(in *NewReportInput) { in.Severity = "impassable" },
+		"out of range latitude":    func(in *NewReportInput) { in.Latitude = 91 },
+		"out of range longitude":   func(in *NewReportInput) { in.Longitude = -181 },
+		"non-point geometry":       func(in *NewReportInput) { in.GeometryType = GeometryArea },
+		"negative water level":     func(in *NewReportInput) { v := -5; in.WaterLevelCM = &v },
+		"invalid water depth":      func(in *NewReportInput) { d := WaterDepth("waist"); in.WaterDepth = &d },
 		"invalid passability": func(in *NewReportInput) {
 			in.Passability = &Passability{Walk: PassPassable, Motorcycle: "fly", Sedan: PassUnknown, SUVPickup: PassUnknown}
 		},
@@ -199,11 +202,26 @@ func TestCategoryRules(t *testing.T) {
 	if !TypeAidPoint.IsFacility() || TypeFlooded.IsFacility() {
 		t.Error("unexpected IsFacility classification")
 	}
-	for _, ty := range validTypes {
-		r := Type(ty).DuplicateRadiusMeters()
+	for ty := range typeRules {
+		r := ty.DuplicateRadiusMeters()
 		if r < 50 || r > 150 {
 			t.Errorf("%s duplicate radius %v outside 50-150m", ty, r)
 		}
+	}
+	// Legacy categories stay readable (list/nearby/duplicate filters accept
+	// them) but new reports can't use them.
+	for _, ty := range []Type{TypeVehicleStalled, TypeHelpNeeded, TypeOther} {
+		if !ty.Valid() || ty.Creatable() {
+			t.Errorf("%s should be valid for reads but not creatable", ty)
+		}
+	}
+	for _, ty := range creatableTypes {
+		if !Type(ty).Valid() || !Type(ty).Creatable() {
+			t.Errorf("%s should be creatable", ty)
+		}
+	}
+	if len(creatableTypes) != len(typeRules)-3 {
+		t.Errorf("creatableTypes has %d entries, want every non-legacy category", len(creatableTypes))
 	}
 	if MaxDuplicateRadiusMeters() != 150 {
 		t.Errorf("max duplicate radius = %v, want 150", MaxDuplicateRadiusMeters())

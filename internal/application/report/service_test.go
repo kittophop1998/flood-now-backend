@@ -165,7 +165,7 @@ func TestServiceCreateSetsLifecycleWindowByCategory(t *testing.T) {
 func TestServiceCreateNormalizesIrrelevantFields(t *testing.T) {
 	svc, _, _ := newTestService(t0)
 	in := validInput()
-	in.Type = domainreport.TypeHelpNeeded
+	in.Type = domainreport.TypePowerOutage
 	d := domainreport.WaterDepthKnee
 	in.WaterDepth = &d
 	in.Passability = &domainreport.Passability{Walk: "passable", Motorcycle: "passable", Sedan: "passable", SUVPickup: "passable"}
@@ -175,7 +175,7 @@ func TestServiceCreateNormalizesIrrelevantFields(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if r.WaterDepth != nil || r.Passability != nil {
-		t.Error("help_needed report should not keep water depth / passability")
+		t.Error("power_outage report should not keep water depth / passability")
 	}
 	if r.GeometryType != domainreport.GeometryPoint {
 		t.Errorf("geometry_type = %q, want point", r.GeometryType)
@@ -189,6 +189,66 @@ func TestServiceCreateRejectsInvalidInput(t *testing.T) {
 	in.Type = "bogus"
 	_, err := svc.Create(context.Background(), in)
 	assertCode(t, err, apperr.CodeValidation)
+}
+
+func TestServiceCreateAcceptsSituationCategories(t *testing.T) {
+	svc, _, _ := newTestService(t0)
+	for _, ty := range []domainreport.Type{domainreport.TypeFlooded, domainreport.TypeAccident} {
+		in := validInput()
+		in.Type = ty
+		r, err := svc.Create(context.Background(), in)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", ty, err)
+		}
+		if r.Type != ty {
+			t.Errorf("type = %q, want %q", r.Type, ty)
+		}
+	}
+}
+
+func TestServiceCreateRejectsSOSOnlyCategories(t *testing.T) {
+	svc, repo, _ := newTestService(t0)
+	for _, ty := range []domainreport.Type{domainreport.TypeVehicleStalled, domainreport.TypeHelpNeeded, domainreport.TypeOther} {
+		in := validInput()
+		in.Type = ty
+		_, err := svc.Create(context.Background(), in)
+		assertCode(t, err, apperr.CodeValidation)
+		var appErr *apperr.Error
+		if errors.As(err, &appErr) && appErr.Fields["type"] == "" {
+			t.Errorf("%s: expected a type field error, got %v", ty, appErr.Fields)
+		}
+	}
+	if len(repo.reports) != 0 {
+		t.Errorf("rejected reports were stored: %d", len(repo.reports))
+	}
+}
+
+// Reports stored before vehicle_stalled/help_needed/other were retired from
+// creation must keep reading, filtering and confirming as before.
+func TestServiceLegacyCategoryReportsStayReadable(t *testing.T) {
+	svc, repo, _ := newTestService(t0)
+	for _, ty := range []domainreport.Type{domainreport.TypeVehicleStalled, domainreport.TypeHelpNeeded, domainreport.TypeOther} {
+		stored := domainreport.Report{
+			ID: uuid.New(), Type: ty, Severity: domainreport.SeverityHigh, Latitude: 13.75, Longitude: 100.5,
+			GeometryType: domainreport.GeometryPoint, CreatedAt: t0, LastVerifiedAt: t0,
+			StaleAt: t0.Add(2 * time.Hour), ExpiresAt: t0.Add(6 * time.Hour),
+		}
+		if err := repo.Create(context.Background(), &stored); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := svc.Get(context.Background(), stored.ID)
+		if err != nil || got == nil || got.Type != ty {
+			t.Fatalf("%s: get = %+v, %v", ty, got, err)
+		}
+		if _, err := svc.FindDuplicates(context.Background(), 13.75, 100.5, ty); err != nil {
+			t.Errorf("%s: duplicate lookup rejected: %v", ty, err)
+		}
+		confirmed, err := svc.Confirm(context.Background(), stored.ID, domainreport.NewConfirmationInput{DeviceID: deviceA, Status: domainreport.StatusStillActive})
+		if err != nil || confirmed.StillActiveCount != 1 {
+			t.Errorf("%s: confirm = %+v, %v", ty, confirmed, err)
+		}
+	}
 }
 
 func TestServiceGetNotFound(t *testing.T) {

@@ -75,6 +75,13 @@ func TestValidation(t *testing.T) {
 	if err := ok.Validate(); err != nil {
 		t.Errorf("valid request rejected: %v", err)
 	}
+	// The categories retired from normal reports live on here.
+	for _, ty := range []Type{TypeVehicleStalled, TypeOther} {
+		ok.Type = ty
+		if err := ok.Validate(); err != nil {
+			t.Errorf("sos %s rejected: %v", ty, err)
+		}
+	}
 
 	h := HelperInput{DeviceID: "12345678-device", Active: true, RadiusM: 3000}
 	if h.Validate() == nil {

@@ -30,33 +30,46 @@ const (
 // typeRules is the single table of per-category behavior: whether the
 // category describes road usability (so passability applies), whether it's
 // a long-lived facility (shelter/aid point use the longer freshness window),
-// and how close a same-category report must be to count as a likely duplicate.
+// how close a same-category report must be to count as a likely duplicate,
+// and whether it's a legacy category that stored reports may still carry but
+// new reports may not use (someone who needs help uses the SOS flow instead).
 var typeRules = map[Type]struct {
 	affectsRoad     bool
 	facility        bool
 	duplicateRadius float64 // meters
+	legacy          bool
 }{
 	TypeFlooded:        {affectsRoad: true, duplicateRadius: 150},
 	TypeRoadClosed:     {affectsRoad: true, duplicateRadius: 100},
 	TypeAccident:       {affectsRoad: true, duplicateRadius: 75},
-	TypeVehicleStalled: {affectsRoad: true, duplicateRadius: 50},
+	TypeVehicleStalled: {affectsRoad: true, duplicateRadius: 50, legacy: true},
 	TypeObstruction:    {affectsRoad: true, duplicateRadius: 50},
 	TypePowerOutage:    {duplicateRadius: 150},
-	TypeHelpNeeded:     {duplicateRadius: 50},
+	TypeHelpNeeded:     {duplicateRadius: 50, legacy: true},
 	TypeShelter:        {facility: true, duplicateRadius: 100},
 	TypeAidPoint:       {facility: true, duplicateRadius: 100},
-	TypeOther:          {duplicateRadius: 50},
+	TypeOther:          {duplicateRadius: 50, legacy: true},
 }
 
-var validTypes = []string{
-	string(TypeFlooded), string(TypeRoadClosed), string(TypeAccident), string(TypeVehicleStalled),
-	string(TypeObstruction), string(TypePowerOutage), string(TypeHelpNeeded), string(TypeShelter),
-	string(TypeAidPoint), string(TypeOther),
+// creatableTypes are the categories a new report may use, in display order.
+var creatableTypes = []string{
+	string(TypeFlooded), string(TypeRoadClosed), string(TypeAccident), string(TypeObstruction),
+	string(TypePowerOutage), string(TypeShelter), string(TypeAidPoint),
 }
 
+// Valid reports whether t is a known category. Legacy categories stay valid
+// so stored reports keep reading, filtering and confirming normally.
 func (t Type) Valid() bool {
 	_, ok := typeRules[t]
 	return ok
+}
+
+// Creatable reports whether a new report may use t. Legacy categories
+// (vehicle_stalled, help_needed, other) describe someone needing assistance
+// and belong to the SOS flow.
+func (t Type) Creatable() bool {
+	r, ok := typeRules[t]
+	return ok && !r.legacy
 }
 
 // AffectsRoad reports whether per-vehicle passability is meaningful for t.
@@ -262,8 +275,11 @@ func ValidClientID(id string) bool {
 func (in NewReportInput) Validate() error {
 	fields := map[string]string{}
 
-	if !in.Type.Valid() {
-		fields["type"] = "must be one of " + strings.Join(validTypes, ", ")
+	if !in.Type.Creatable() {
+		fields["type"] = "must be one of " + strings.Join(creatableTypes, ", ")
+		if in.Type.Valid() {
+			fields["type"] = "this category must use the SOS flow (POST /api/v1/sos); new reports " + fields["type"]
+		}
 	}
 	if !in.Severity.Valid() {
 		fields["severity"] = "must be one of " + strings.Join(validSeverities, ", ")
