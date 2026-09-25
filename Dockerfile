@@ -3,15 +3,12 @@
 FROM golang:1.27-alpine AS build
 WORKDIR /src
 
-RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
-    --mount=type=bind,source=go.mod,target=go.mod \
+RUN --mount=type=bind,source=go.mod,target=go.mod \
     --mount=type=bind,source=go.sum,target=go.sum \
     go mod download
 
 COPY . .
-RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
-    --mount=type=cache,id=go-build,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
 
 FROM alpine:3.21 AS runtime
 RUN apk add --no-cache ca-certificates && \
