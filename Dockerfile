@@ -4,7 +4,7 @@ FROM golang:1.27.1-alpine AS build
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
+RUN --mount=type=cache,id=go-mod-cache,target=/go/pkg/mod \
     go mod download
 
 COPY . .
