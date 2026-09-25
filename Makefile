@@ -1,4 +1,4 @@
-.PHONY: run build test migrate-up migrate-down
+.PHONY: run build test migrate-up migrate-down migrate-status
 
 DATABASE_URL ?= postgres://floodnow:floodnow@localhost:5433/floodnow?sslmode=disable
 
@@ -12,13 +12,10 @@ test:
 	go test ./...
 
 migrate-up:
-	for f in migrations/*.up.sql; do \
-		echo "applying $$f"; \
-		psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -f $$f || exit 1; \
-	done
+	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate up
 
 migrate-down:
-	for f in $$(ls -r migrations/*.down.sql); do \
-		echo "reverting $$f"; \
-		psql "$(DATABASE_URL)" -v ON_ERROR_STOP=1 -f $$f || exit 1; \
-	done
+	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate down
+
+migrate-status:
+	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate status

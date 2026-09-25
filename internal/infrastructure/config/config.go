@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -22,7 +24,12 @@ type Config struct {
 	ImageKitBaseURL string
 }
 
+// Load reads configuration from the environment, loading a .env file first
+// if one is present (local dev only — in production, real env vars are set
+// by the platform and no .env file exists, so a missing file is not an error).
 func Load() (*Config, error) {
+	_ = godotenv.Load()
+
 	cfg := &Config{
 		Port:        getEnv("PORT", "4000"),
 		DatabaseURL: os.Getenv("DATABASE_URL"),
