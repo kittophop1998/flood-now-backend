@@ -20,6 +20,8 @@ func statusForCode(code apperr.Code) int {
 		return http.StatusConflict
 	case apperr.CodePayloadTooLarge:
 		return http.StatusRequestEntityTooLarge
+	case apperr.CodeUnavailable:
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}

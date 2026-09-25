@@ -4,16 +4,23 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	Port           string
-	DatabaseURL    string
-	WebOrigin      string
-	ReportTTL      time.Duration
+	Port        string
+	DatabaseURL string
+	WebOrigin   string
+	// Report lifecycle timing (see domain/report.FreshnessPolicy).
+	ReportStaleAfter         time.Duration
+	ReportTTL                time.Duration
+	FacilityReportStaleAfter time.Duration
+	FacilityReportTTL        time.Duration
+	ReportResolveThreshold   int
 
 	R2AccountID       string
 	R2AccessKeyID     string
@@ -22,6 +29,9 @@ type Config struct {
 	R2Endpoint        string // optional override, derived from account id if empty
 
 	ImageKitBaseURL string
+
+	GeocoderURL       string
+	GeocoderUserAgent string
 }
 
 // Load reads configuration from the environment, loading a .env file first
@@ -42,18 +52,39 @@ func Load() (*Config, error) {
 		R2Endpoint:        os.Getenv("R2_ENDPOINT"),
 
 		ImageKitBaseURL: os.Getenv("IMAGEKIT_BASE_URL"),
+
+		GeocoderURL:       strings.TrimRight(getEnv("GEOCODER_URL", "https://nominatim.openstreetmap.org"), "/"),
+		GeocoderUserAgent: getEnv("GEOCODER_USER_AGENT", "FloodNow/1.0 (community flood map)"),
 	}
 
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 
-	ttlStr := getEnv("REPORT_TTL", "2h")
-	ttl, err := time.ParseDuration(ttlStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid REPORT_TTL %q: %w", ttlStr, err)
+	durations := []struct {
+		key, fallback string
+		dst           *time.Duration
+	}{
+		{"REPORT_STALE_AFTER", "2h", &cfg.ReportStaleAfter},
+		{"REPORT_TTL", "6h", &cfg.ReportTTL},
+		{"FACILITY_REPORT_STALE_AFTER", "12h", &cfg.FacilityReportStaleAfter},
+		{"FACILITY_REPORT_TTL", "48h", &cfg.FacilityReportTTL},
 	}
-	cfg.ReportTTL = ttl
+	for _, d := range durations {
+		raw := getEnv(d.key, d.fallback)
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s %q: %w", d.key, raw, err)
+		}
+		*d.dst = v
+	}
+
+	thresholdStr := getEnv("REPORT_RESOLVE_THRESHOLD", "2")
+	threshold, err := strconv.Atoi(thresholdStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid REPORT_RESOLVE_THRESHOLD %q: %w", thresholdStr, err)
+	}
+	cfg.ReportResolveThreshold = threshold
 
 	if cfg.R2Endpoint == "" && cfg.R2AccountID != "" {
 		cfg.R2Endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.R2AccountID)

@@ -12,6 +12,7 @@ const (
 	CodeNotFound        Code = "NOT_FOUND"
 	CodeConflict        Code = "CONFLICT"
 	CodePayloadTooLarge Code = "PAYLOAD_TOO_LARGE"
+	CodeUnavailable     Code = "UPSTREAM_UNAVAILABLE"
 	CodeInternal        Code = "INTERNAL_ERROR"
 )
 
@@ -41,4 +42,10 @@ func PayloadTooLarge(message string) *Error {
 
 func Internal(message string) *Error {
 	return &Error{Code: CodeInternal, Message: message}
+}
+
+// Unavailable signals a dependency outside our control (e.g. the geocoder)
+// is down; the client can retry later.
+func Unavailable(message string) *Error {
+	return &Error{Code: CodeUnavailable, Message: message}
 }
