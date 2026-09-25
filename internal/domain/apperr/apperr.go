@@ -14,6 +14,8 @@ const (
 	CodePayloadTooLarge Code = "PAYLOAD_TOO_LARGE"
 	CodeUnavailable     Code = "UPSTREAM_UNAVAILABLE"
 	CodeInternal        Code = "INTERNAL_ERROR"
+	CodeUnauthorized    Code = "UNAUTHORIZED"
+	CodeRateLimited     Code = "RATE_LIMITED"
 )
 
 // Error is the single error type carried across layers. Handlers map it to
@@ -34,6 +36,20 @@ func Validation(message string, fields map[string]string) *Error {
 
 func NotFound(message string) *Error {
 	return &Error{Code: CodeNotFound, Message: message}
+}
+
+func Conflict(message string) *Error {
+	return &Error{Code: CodeConflict, Message: message}
+}
+
+// Unauthorized means missing/invalid operator credentials (admin routes).
+func Unauthorized(message string) *Error {
+	return &Error{Code: CodeUnauthorized, Message: message}
+}
+
+// RateLimited means the caller did the same thing too often; retry later.
+func RateLimited(message string) *Error {
+	return &Error{Code: CodeRateLimited, Message: message}
 }
 
 func PayloadTooLarge(message string) *Error {

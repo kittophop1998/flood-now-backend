@@ -25,12 +25,24 @@ type fakeFollows struct {
 	lastQuery  ports.NotificationQuery
 }
 
-func (f *fakeFollows) ListByDevice(ctx context.Context, deviceID string) ([]domainfollow.Follow, error) {
-	return f.follows, nil
+func (f *fakeFollows) ofKinds(kinds []domainfollow.Kind) []domainfollow.Follow {
+	var out []domainfollow.Follow
+	for _, fl := range f.follows {
+		for _, k := range kinds {
+			if fl.Kind == k {
+				out = append(out, fl)
+			}
+		}
+	}
+	return out
 }
 
-func (f *fakeFollows) CountByDevice(ctx context.Context, deviceID string) (int, error) {
-	return len(f.follows), nil
+func (f *fakeFollows) ListByDevice(ctx context.Context, deviceID string, kinds ...domainfollow.Kind) ([]domainfollow.Follow, error) {
+	return f.ofKinds(kinds), nil
+}
+
+func (f *fakeFollows) CountByDevice(ctx context.Context, deviceID string, kinds ...domainfollow.Kind) (int, error) {
+	return len(f.ofKinds(kinds)), nil
 }
 
 func (f *fakeFollows) FindReportFollow(ctx context.Context, deviceID string, reportID uuid.UUID) (*domainfollow.Follow, error) {
@@ -48,8 +60,47 @@ func (f *fakeFollows) Create(ctx context.Context, fl *domainfollow.Follow) error
 	return nil
 }
 
-func (f *fakeFollows) Delete(ctx context.Context, deviceID string, id uuid.UUID) (bool, error) {
+func (f *fakeFollows) Delete(ctx context.Context, deviceID string, id uuid.UUID, kinds ...domainfollow.Kind) (bool, error) {
+	for i, fl := range f.follows {
+		if fl.ID == id && fl.DeviceID == deviceID && len(f.ofKinds(kinds)) > 0 {
+			for _, k := range kinds {
+				if fl.Kind == k {
+					f.follows = append(f.follows[:i], f.follows[i+1:]...)
+					return true, nil
+				}
+			}
+		}
+	}
 	return false, nil
+}
+
+func (f *fakeFollows) GetPlace(ctx context.Context, deviceID string, id uuid.UUID) (*domainfollow.Follow, error) {
+	for _, fl := range f.follows {
+		if fl.ID == id && fl.DeviceID == deviceID && fl.Kind == domainfollow.KindPlace {
+			cp := fl
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeFollows) UpdatePlace(ctx context.Context, fl *domainfollow.Follow) error {
+	for i := range f.follows {
+		if f.follows[i].ID == fl.ID {
+			f.follows[i] = *fl
+		}
+	}
+	return nil
+}
+
+func (f *fakeFollows) PlaceSummaries(ctx context.Context, deviceID string, severe []domainreport.Severity, now time.Time) ([]domainfollow.PlaceWithSummary, error) {
+	var out []domainfollow.PlaceWithSummary
+	for _, fl := range f.follows {
+		if fl.Kind == domainfollow.KindPlace && fl.DeviceID == deviceID {
+			out = append(out, domainfollow.PlaceWithSummary{Follow: fl})
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeFollows) Notifications(ctx context.Context, q ports.NotificationQuery) ([]ports.NotificationCandidate, error) {
@@ -100,13 +151,69 @@ func TestCreateReportFollowUnknownReport(t *testing.T) {
 	assertCode(t, err, apperr.CodeNotFound)
 }
 
+func followsOfKind(kind domainfollow.Kind, n int) []domainfollow.Follow {
+	out := make([]domainfollow.Follow, n)
+	for i := range out {
+		out[i] = domainfollow.Follow{ID: uuid.New(), DeviceID: device, Kind: kind}
+	}
+	return out
+}
+
 func TestCreateFollowEnforcesPerDeviceCap(t *testing.T) {
-	follows := &fakeFollows{follows: make([]domainfollow.Follow, domainfollow.MaxPerDevice)}
+	follows := &fakeFollows{follows: followsOfKind(domainfollow.KindArea, domainfollow.MaxPerDevice)}
 	svc := appfollow.NewService(follows, fakeReports{}, fakeClock{now})
 	_, err := svc.Create(context.Background(), domainfollow.NewFollowInput{
 		DeviceID: device, Kind: domainfollow.KindArea, Latitude: ptr(13.7), Longitude: ptr(100.5), RadiusM: ptr(1000),
 	})
 	assertCode(t, err, apperr.CodeConflict)
+}
+
+func TestSavedPlacesHaveTheirOwnCapAndDefaults(t *testing.T) {
+	// A device at the follow cap can still save places, and vice versa.
+	follows := &fakeFollows{follows: followsOfKind(domainfollow.KindArea, domainfollow.MaxPerDevice)}
+	svc := appfollow.NewService(follows, fakeReports{}, fakeClock{now})
+	icon := domainfollow.IconHome
+	p, err := svc.CreatePlace(context.Background(), device, domainfollow.PlaceFields{
+		Name: ptr("  บ้าน  "), Icon: &icon, Latitude: ptr(13.7), Longitude: ptr(100.5),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if *p.Name != "บ้าน" || *p.RadiusM != 1000 || !p.Notify || p.Kind != domainfollow.KindPlace {
+		t.Errorf("place defaults not applied: name=%q radius=%d notify=%v kind=%s", *p.Name, *p.RadiusM, p.Notify, p.Kind)
+	}
+
+	follows.follows = append(follows.follows, followsOfKind(domainfollow.KindPlace, domainfollow.MaxPlacesPerDevice)...)
+	_, err = svc.CreatePlace(context.Background(), device, domainfollow.PlaceFields{
+		Name: ptr("x"), Icon: &icon, Latitude: ptr(13.7), Longitude: ptr(100.5),
+	})
+	assertCode(t, err, apperr.CodeConflict)
+}
+
+func TestUpdatePlaceIsOwnerScopedAndPartial(t *testing.T) {
+	follows := &fakeFollows{}
+	svc := appfollow.NewService(follows, fakeReports{}, fakeClock{now})
+	icon := domainfollow.IconWork
+	p, err := svc.CreatePlace(context.Background(), device, domainfollow.PlaceFields{
+		Name: ptr("Office"), Icon: &icon, Latitude: ptr(13.7), Longitude: ptr(100.5), PreferredVehicle: ptr("sedan"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	_, err = svc.UpdatePlace(context.Background(), "someone-else-device", p.ID, domainfollow.PlaceFields{Notify: ptr(false)})
+	assertCode(t, err, apperr.CodeNotFound)
+
+	updated, err := svc.UpdatePlace(context.Background(), device, p.ID, domainfollow.PlaceFields{Notify: ptr(false), RadiusM: ptr(5000), PreferredVehicle: ptr("")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if updated.Notify || *updated.RadiusM != 5000 || updated.PreferredVehicle != nil || *updated.Name != "Office" {
+		t.Errorf("partial update wrong: %+v", updated.Follow)
+	}
+
+	_, err = svc.UpdatePlace(context.Background(), device, p.ID, domainfollow.PlaceFields{RadiusM: ptr(2500)})
+	assertCode(t, err, apperr.CodeValidation)
 }
 
 func TestNotificationsMapsFiltersAndDedupes(t *testing.T) {

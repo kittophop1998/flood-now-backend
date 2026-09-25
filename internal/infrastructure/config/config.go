@@ -32,6 +32,23 @@ type Config struct {
 
 	GeocoderURL       string
 	GeocoderUserAgent string
+
+	// OSRM-compatible routing for safe-route evaluation.
+	RouterURL     string // serves /route/v1/driving
+	RouterFootURL string // serves /route/v1/foot
+
+	// AdminToken gates the operator API; empty disables it.
+	AdminToken string
+
+	// Moderation (see domain/moderation.Policy).
+	ModerationAutoHideThreshold int
+	ModerationMaxPerDeviceHour  int
+
+	// Donation (PromptPay). Validated/normalized in domain/donation; any
+	// problem just turns the feature off.
+	DonationEnabled string
+	PromptPayID     string
+	PromptPayName   string
 }
 
 // Load reads configuration from the environment, loading a .env file first
@@ -55,6 +72,18 @@ func Load() (*Config, error) {
 
 		GeocoderURL:       strings.TrimRight(getEnv("GEOCODER_URL", "https://nominatim.openstreetmap.org"), "/"),
 		GeocoderUserAgent: getEnv("GEOCODER_USER_AGENT", "FloodNow/1.0 (community flood map)"),
+
+		RouterURL:     strings.TrimRight(getEnv("ROUTER_URL", "https://routing.openstreetmap.de/routed-car"), "/"),
+		RouterFootURL: strings.TrimRight(getEnv("ROUTER_FOOT_URL", "https://routing.openstreetmap.de/routed-foot"), "/"),
+
+		AdminToken: os.Getenv("ADMIN_TOKEN"),
+
+		DonationEnabled: os.Getenv("DONATION_ENABLED"),
+		PromptPayID:     os.Getenv("PROMPTPAY_ID"),
+		PromptPayName:   os.Getenv("PROMPTPAY_NAME"),
+	}
+	if cfg.AdminToken != "" && len(cfg.AdminToken) < 24 {
+		return nil, fmt.Errorf("ADMIN_TOKEN must be at least 24 characters (or empty to disable the admin API)")
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -85,6 +114,22 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid REPORT_RESOLVE_THRESHOLD %q: %w", thresholdStr, err)
 	}
 	cfg.ReportResolveThreshold = threshold
+
+	ints := []struct {
+		key, fallback string
+		dst           *int
+	}{
+		{"MODERATION_AUTO_HIDE_THRESHOLD", "3", &cfg.ModerationAutoHideThreshold},
+		{"MODERATION_MAX_PER_DEVICE_HOUR", "10", &cfg.ModerationMaxPerDeviceHour},
+	}
+	for _, it := range ints {
+		raw := getEnv(it.key, it.fallback)
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s %q: %w", it.key, raw, err)
+		}
+		*it.dst = v
+	}
 
 	if cfg.R2Endpoint == "" && cfg.R2AccountID != "" {
 		cfg.R2Endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.R2AccountID)

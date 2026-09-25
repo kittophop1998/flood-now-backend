@@ -201,7 +201,22 @@ type Report struct {
 	StaleAt        time.Time
 	ExpiresAt      time.Time
 	ResolvedAt     *time.Time
+	// ClientID is an optional client-generated idempotency key (offline
+	// queue): re-sending the same create returns the original report.
+	ClientID *string
+	// HiddenAt is set by moderation; hidden reports are excluded from every
+	// public read.
+	HiddenAt     *time.Time
+	HiddenReason *HiddenReason
 }
+
+// HiddenReason records who hid a report.
+type HiddenReason string
+
+const (
+	HiddenAutoThreshold HiddenReason = "auto_threshold" // enough distinct problem reports
+	HiddenAdmin         HiddenReason = "admin"
+)
 
 // ReportWithStats is a Report plus derived/aggregated fields used for API
 // responses. It lives in the domain because lifecycle status and the
@@ -234,6 +249,12 @@ type NewReportInput struct {
 	HasChild     *bool
 	HasElderly   *bool
 	ContactPhone *string
+	ClientID     *string
+}
+
+// ValidClientID reports whether id is an acceptable idempotency key.
+func ValidClientID(id string) bool {
+	return len(id) >= 8 && len(id) <= 64 && !strings.ContainsAny(id, " \t\n")
 }
 
 // Validate checks all business invariants for a new report and returns a
@@ -283,6 +304,9 @@ func (in NewReportInput) Validate() error {
 	}
 	if in.Description != nil && len(*in.Description) > 2000 {
 		fields["description"] = "must be 2000 characters or fewer"
+	}
+	if in.ClientID != nil && !ValidClientID(*in.ClientID) {
+		fields["client_id"] = "must be 8-64 characters without spaces"
 	}
 
 	if len(fields) > 0 {

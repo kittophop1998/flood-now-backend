@@ -27,6 +27,8 @@ type fakeRepo struct {
 	lastList   ports.ReportFilter
 	lastNearby ports.NearbyFilter
 	listResult []domainreport.ReportWithStats
+
+	lastAggregate ports.AggregateFilter
 }
 
 func newFakeRepo() *fakeRepo {
@@ -57,6 +59,25 @@ func (f *fakeRepo) List(ctx context.Context, filter ports.ReportFilter) ([]domai
 
 func (f *fakeRepo) Nearby(ctx context.Context, filter ports.NearbyFilter) ([]domainreport.ReportWithStats, error) {
 	f.lastNearby = filter
+	return nil, nil
+}
+
+func (f *fakeRepo) FindByClientID(ctx context.Context, clientID string) (*domainreport.ReportWithStats, error) {
+	for _, r := range f.reports {
+		if r.ClientID != nil && *r.ClientID == clientID {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeRepo) Aggregate(ctx context.Context, filter ports.AggregateFilter) ([]ports.AggregateCell, error) {
+	f.lastAggregate = filter
+	return nil, nil
+}
+
+func (f *fakeRepo) Events(ctx context.Context, id uuid.UUID) ([]ports.ReportEvent, error) {
 	return nil, nil
 }
 
@@ -307,5 +328,62 @@ func assertCode(t *testing.T, err error, code apperr.Code) {
 	var appErr *apperr.Error
 	if !errors.As(err, &appErr) || appErr.Code != code {
 		t.Fatalf("expected %s, got %v", code, err)
+	}
+}
+
+func TestCreateWithClientIDIsIdempotent(t *testing.T) {
+	svc, repo, _ := newTestService(t0)
+	in := validInput()
+	id := "offline-queue-0001"
+	in.ClientID = &id
+
+	first, err := svc.Create(context.Background(), in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	second, err := svc.Create(context.Background(), in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if first.ID != second.ID || len(repo.reports) != 1 {
+		t.Errorf("retrying a queued report created %d reports", len(repo.reports))
+	}
+
+	bad := validInput()
+	short := "x"
+	bad.ClientID = &short
+	_, err = svc.Create(context.Background(), bad)
+	assertCode(t, err, apperr.CodeValidation)
+}
+
+func TestHiddenReportsAreNotFoundAndCannotBeConfirmed(t *testing.T) {
+	svc, repo, _ := newTestService(t0)
+	r, _ := svc.Create(context.Background(), validInput())
+	hiddenAt := t0
+	repo.reports[r.ID].HiddenAt = &hiddenAt
+
+	_, err := svc.Get(context.Background(), r.ID)
+	assertCode(t, err, apperr.CodeNotFound)
+	_, err = svc.Confirm(context.Background(), r.ID, domainreport.NewConfirmationInput{DeviceID: deviceA, Status: domainreport.StatusCleared})
+	assertCode(t, err, apperr.CodeNotFound)
+}
+
+func TestAggregateValidatesAndSizesCellsByZoom(t *testing.T) {
+	svc, repo, _ := newTestService(t0)
+	_, err := svc.Aggregate(context.Background(), appreport.AggregateInput{Zoom: 10})
+	assertCode(t, err, apperr.CodeValidation)
+
+	bbox := &ports.BBox{MinLat: 13, MaxLat: 14, MinLng: 100, MaxLng: 101}
+	if _, err := svc.Aggregate(context.Background(), appreport.AggregateInput{BBox: bbox, Zoom: 10}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := repo.lastAggregate.CellDeg, 360.0/1024/8; got != want {
+		t.Errorf("cell size at z10 = %v, want %v", got, want)
+	}
+	if len(repo.lastAggregate.Statuses) != 2 {
+		t.Errorf("aggregate must default to open statuses, got %v", repo.lastAggregate.Statuses)
+	}
+	if appreport.CellDegreesForZoom(12) >= appreport.CellDegreesForZoom(10) {
+		t.Error("cells must shrink as the map zooms in")
 	}
 }

@@ -22,6 +22,10 @@ func statusForCode(code apperr.Code) int {
 		return http.StatusRequestEntityTooLarge
 	case apperr.CodeUnavailable:
 		return http.StatusServiceUnavailable
+	case apperr.CodeUnauthorized:
+		return http.StatusUnauthorized
+	case apperr.CodeRateLimited:
+		return http.StatusTooManyRequests
 	default:
 		return http.StatusInternalServerError
 	}

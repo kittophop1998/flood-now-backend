@@ -4,6 +4,8 @@ package report
 
 import (
 	"context"
+	"errors"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +27,13 @@ const (
 	MaxNearbyLimit       = 100
 
 	maxDuplicateCandidates = 3
+
+	// Aggregation: at zoom z a cell is 1/8 of a 512 px map tile (~64 px), so
+	// zones stay readable at every zoom and the cell count stays bounded by
+	// the viewport size.
+	MinAggregateZoom  = 0
+	MaxAggregateZoom  = 16
+	maxAggregateCells = 2000
 )
 
 type Service struct {
@@ -37,11 +46,19 @@ func NewService(repo ports.ReportRepository, clock ports.Clock, policy domainrep
 	return &Service{repo: repo, clock: clock, policy: policy}
 }
 
+// Create stores a new report. With a ClientID (offline queue) the call is
+// idempotent: re-sending returns the report created the first time.
 func (s *Service) Create(ctx context.Context, in domainreport.NewReportInput) (*domainreport.ReportWithStats, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
 	}
 	in = in.Normalized()
+	if in.ClientID != nil {
+		existing, err := s.repo.FindByClientID(ctx, *in.ClientID)
+		if err != nil || existing != nil {
+			return existing, err
+		}
+	}
 
 	now := s.clock.Now()
 	staleAt, expiresAt := s.policy.Window(in.Type, now)
@@ -66,24 +83,89 @@ func (s *Service) Create(ctx context.Context, in domainreport.NewReportInput) (*
 		LastVerifiedAt: now,
 		StaleAt:        staleAt,
 		ExpiresAt:      expiresAt,
+		ClientID:       in.ClientID,
 	}
 
 	if err := s.repo.Create(ctx, r); err != nil {
+		var appErr *apperr.Error
+		if in.ClientID != nil && errors.As(err, &appErr) && appErr.Code == apperr.CodeConflict {
+			// A concurrent retry with the same client id won the insert.
+			if existing, ferr := s.repo.FindByClientID(ctx, *in.ClientID); ferr == nil && existing != nil {
+				return existing, nil
+			}
+		}
 		return nil, err
 	}
 
 	return &domainreport.ReportWithStats{Report: *r}, nil
 }
 
+// Get returns a report by id. Reports hidden by moderation are not found.
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (*domainreport.ReportWithStats, error) {
 	r, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if r == nil {
+	if r == nil || r.HiddenAt != nil {
 		return nil, apperr.NotFound("report not found")
 	}
 	return r, nil
+}
+
+type AggregateInput struct {
+	BBox       *ports.BBox
+	Zoom       int
+	Types      []domainreport.Type
+	Severities []domainreport.Severity
+	Statuses   []domainreport.Status
+}
+
+type AggregateResult struct {
+	Cells   []ports.AggregateCell
+	CellDeg float64
+	Total   int
+}
+
+// CellDegreesForZoom is the aggregation grid size at a map zoom level.
+func CellDegreesForZoom(zoom int) float64 {
+	return 360 / math.Pow(2, float64(zoom)) / 8
+}
+
+// Aggregate groups open reports in a viewport into grid cells for the
+// zoomed-out map (heatmap / flood zones) instead of sending every report.
+func (s *Service) Aggregate(ctx context.Context, in AggregateInput) (*AggregateResult, error) {
+	fields := map[string]string{}
+	if in.BBox == nil {
+		fields["bbox"] = "min_lat, max_lat, min_lng, max_lng are required"
+	}
+	if in.Zoom < MinAggregateZoom || in.Zoom > MaxAggregateZoom {
+		fields["zoom"] = "must be between 0 and 16"
+	}
+	if len(fields) > 0 {
+		return nil, apperr.Validation("aggregate query is invalid", fields)
+	}
+	statuses := in.Statuses
+	if len(statuses) == 0 {
+		statuses = domainreport.DefaultVisibleStatuses
+	}
+	cellDeg := CellDegreesForZoom(in.Zoom)
+	cells, err := s.repo.Aggregate(ctx, ports.AggregateFilter{
+		BBox:       *in.BBox,
+		CellDeg:    cellDeg,
+		Types:      in.Types,
+		Severities: in.Severities,
+		Statuses:   statuses,
+		Now:        s.clock.Now(),
+		MaxCells:   maxAggregateCells,
+	})
+	if err != nil {
+		return nil, err
+	}
+	res := &AggregateResult{Cells: cells, CellDeg: cellDeg}
+	for _, c := range cells {
+		res.Total += c.Count
+	}
+	return res, nil
 }
 
 type ListInput struct {
@@ -230,14 +312,14 @@ func (s *Service) Confirm(ctx context.Context, reportID uuid.UUID, in domainrepo
 		Now:      now,
 		Policy:   s.policy,
 	}
+	existing, err := s.repo.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil || existing.HiddenAt != nil {
+		return nil, apperr.NotFound("report not found")
+	}
 	if in.Status == domainreport.StatusStillActive {
-		existing, err := s.repo.GetByID(ctx, reportID)
-		if err != nil {
-			return nil, err
-		}
-		if existing == nil {
-			return nil, apperr.NotFound("report not found")
-		}
 		staleAt, expiresAt := s.policy.Window(existing.Type, now)
 		params.Refresh = &ports.Freshness{StaleAt: staleAt, ExpiresAt: expiresAt}
 	}

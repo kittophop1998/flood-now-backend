@@ -60,3 +60,42 @@ func TestNotificationKindFor(t *testing.T) {
 		}
 	}
 }
+
+func TestPlaceNotificationsAreSevereOnlyAndIncludeReopened(t *testing.T) {
+	if k, ok := NotificationKindFor(KindPlace, report.EventCreated, report.SeverityCritical); !ok || k != NotifySevereNearby {
+		t.Error("a new critical report in a watched place notifies")
+	}
+	if k, ok := NotificationKindFor(KindPlace, report.EventReopened, report.SeverityHigh); !ok || k != NotifySevereNearby {
+		t.Error("a severe report happening again in a watched place notifies")
+	}
+	if _, ok := NotificationKindFor(KindPlace, report.EventCreated, report.SeverityModerate); ok {
+		t.Error("non-severe reports never notify a watched place")
+	}
+	if _, ok := NotificationKindFor(KindPlace, report.EventConfirmed, report.SeverityCritical); ok {
+		t.Error("confirmations never notify a watched place (anti-spam)")
+	}
+}
+
+func TestPlaceFieldsValidate(t *testing.T) {
+	home := IconHome
+	if err := (PlaceFields{Name: ptr("บ้าน"), Icon: &home, Latitude: ptr(13.7), Longitude: ptr(100.5)}).Validate(true); err != nil {
+		t.Errorf("valid place rejected: %v", err)
+	}
+	bad := map[string]PlaceFields{
+		"missing name":  {Icon: &home, Latitude: ptr(13.7), Longitude: ptr(100.5)},
+		"blank name":    {Name: ptr("  "), Icon: &home, Latitude: ptr(13.7), Longitude: ptr(100.5)},
+		"latitude only": {Name: ptr("x"), Icon: &home, Latitude: ptr(13.7)},
+		"bad radius":    {Name: ptr("x"), Icon: &home, Latitude: ptr(13.7), Longitude: ptr(100.5), RadiusM: ptr(2500)},
+		"bad vehicle":   {Name: ptr("x"), Icon: &home, Latitude: ptr(13.7), Longitude: ptr(100.5), PreferredVehicle: ptr("bus")},
+		"out of range":  {Name: ptr("x"), Icon: &home, Latitude: ptr(95.0), Longitude: ptr(100.5)},
+	}
+	for name, p := range bad {
+		if p.Validate(true) == nil {
+			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+	summary := AreaSummary{ActiveCount: 2}
+	if summary.Level() != AreaCaution || (AreaSummary{}).Level() != AreaClear || (AreaSummary{ActiveCount: 1, SevereCount: 1}).Level() != AreaSevere {
+		t.Error("area level derivation is wrong")
+	}
+}

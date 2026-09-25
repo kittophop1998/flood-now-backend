@@ -85,6 +85,16 @@ func (p *ReportPresenter) one(r domainreport.ReportWithStats) reportResponse {
 	}
 }
 
+// admin adds moderation state, for operator endpoints only.
+func (p *ReportPresenter) admin(r domainreport.ReportWithStats) adminReportResponse {
+	out := adminReportResponse{reportResponse: p.one(r), HiddenAt: utcPtr(r.HiddenAt)}
+	if r.HiddenReason != nil {
+		s := string(*r.HiddenReason)
+		out.HiddenReason = &s
+	}
+	return out
+}
+
 func (p *ReportPresenter) many(rs []domainreport.ReportWithStats) []reportResponse {
 	out := make([]reportResponse, 0, len(rs))
 	for _, r := range rs {
@@ -189,6 +199,14 @@ func (p *queryParser) types() []domainreport.Type {
 	return out
 }
 
+func (p *queryParser) severities() []domainreport.Severity {
+	var out []domainreport.Severity
+	for _, v := range p.list("severities", func(s string) bool { return domainreport.Severity(s).Valid() }) {
+		out = append(out, domainreport.Severity(v))
+	}
+	return out
+}
+
 func (p *queryParser) statuses() []domainreport.Status {
 	var out []domainreport.Status
 	for _, v := range p.list("statuses", func(s string) bool { return domainreport.Status(s).Valid() }) {
@@ -230,9 +248,7 @@ func (h *ReportHandler) List(c *gin.Context) {
 		Statuses:     p.statuses(),
 		UpdatedSince: p.time("updated_since"),
 		Limit:        p.int("limit"),
-	}
-	for _, v := range p.list("severities", func(s string) bool { return domainreport.Severity(s).Valid() }) {
-		in.Severities = append(in.Severities, domainreport.Severity(v))
+		Severities:   p.severities(),
 	}
 	// Kept for backward compatibility: include_expired=true widens the
 	// default status set to every status.
@@ -250,6 +266,39 @@ func (h *ReportHandler) List(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, listReportsResponse{Reports: h.presenter.many(res.Reports), HasMore: res.HasMore})
+}
+
+// Aggregate serves the zoomed-out map: grid cells instead of reports.
+func (h *ReportHandler) Aggregate(c *gin.Context) {
+	p := newQueryParser(c)
+	in := appreport.AggregateInput{
+		BBox:       p.bbox(),
+		Zoom:       p.int("zoom"),
+		Types:      p.types(),
+		Severities: p.severities(),
+		Statuses:   p.statuses(),
+	}
+	if !p.q.Has("zoom") {
+		p.fields["zoom"] = "is required"
+	}
+	if err := p.err("aggregate query is invalid"); err != nil {
+		writeError(c, err)
+		return
+	}
+
+	res, err := h.service.Aggregate(c.Request.Context(), in)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	cells := make([]aggregateCellResponse, 0, len(res.Cells))
+	for _, cell := range res.Cells {
+		cells = append(cells, aggregateCellResponse{
+			Latitude: cell.Latitude, Longitude: cell.Longitude, Count: cell.Count, SevereCount: cell.SevereCount,
+			MaxSeverity: string(cell.MaxSeverity), LatestUpdateAt: cell.LatestUpdateAt.UTC(),
+		})
+	}
+	c.JSON(http.StatusOK, aggregateResponse{Cells: cells, CellSizeDeg: res.CellDeg, Total: res.Total})
 }
 
 func (h *ReportHandler) Nearby(c *gin.Context) {

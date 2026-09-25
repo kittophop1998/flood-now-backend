@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
+	"floodnow-api/internal/domain/apperr"
 	"floodnow-api/internal/domain/report"
 	"floodnow-api/internal/ports"
 )
@@ -31,6 +33,7 @@ const reportColumns = `
 	r.water_depth, r.water_level_cm, r.pass_walk, r.pass_motorcycle, r.pass_sedan, r.pass_suv_pickup,
 	r.description, r.image_key, r.people_count, r.has_child, r.has_elderly, r.contact_phone,
 	r.created_at, r.updated_at, r.last_verified_at, r.stale_at, r.expires_at, r.resolved_at,
+	r.client_id, r.hidden_at, r.hidden_reason,
 	(SELECT COUNT(*) FROM report_confirmations c WHERE c.report_id = r.id AND c.status = 'still_active') AS still_active_count,
 	(SELECT COUNT(*) FROM report_confirmations c WHERE c.report_id = r.id AND c.status = 'cleared') AS cleared_count
 `
@@ -48,6 +51,7 @@ func scanReport(row rowScanner, extra ...any) (*report.ReportWithStats, error) {
 		&waterDepth, &r.WaterLevelCM, &walk, &moto, &sedan, &suv,
 		&r.Description, &r.ImageKey, &r.PeopleCount, &r.HasChild, &r.HasElderly, &r.ContactPhone,
 		&r.CreatedAt, &r.UpdatedAt, &r.LastVerifiedAt, &r.StaleAt, &r.ExpiresAt, &r.ResolvedAt,
+		&r.ClientID, &r.HiddenAt, &r.HiddenReason,
 		&r.StillActiveCount, &r.ClearedCount,
 	}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
@@ -99,19 +103,28 @@ func (repo *ReportRepository) Create(ctx context.Context, r *report.Report) erro
 			id, type, severity, latitude, longitude, geometry_type,
 			water_depth, water_level_cm, pass_walk, pass_motorcycle, pass_sedan, pass_suv_pickup,
 			description, image_key, people_count, has_child, has_elderly, contact_phone,
-			created_at, updated_at, last_verified_at, stale_at, expires_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+			created_at, updated_at, last_verified_at, stale_at, expires_at, client_id
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
 		r.ID, r.Type, r.Severity, r.Latitude, r.Longitude, r.GeometryType,
 		waterDepth, r.WaterLevelCM, pass[0], pass[1], pass[2], pass[3],
 		r.Description, r.ImageKey, r.PeopleCount, r.HasChild, r.HasElderly, r.ContactPhone,
-		r.CreatedAt, r.UpdatedAt, r.LastVerifiedAt, r.StaleAt, r.ExpiresAt,
+		r.CreatedAt, r.UpdatedAt, r.LastVerifiedAt, r.StaleAt, r.ExpiresAt, r.ClientID,
 	); err != nil {
+		if isUniqueViolation(err) {
+			return apperr.Conflict("a report with this client_id already exists")
+		}
 		return fmt.Errorf("insert report: %w", err)
 	}
 	if err := insertEvent(ctx, tx, r.ID, report.EventCreated, nil, r.CreatedAt); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// isUniqueViolation reports a Postgres unique-constraint error.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 func insertEvent(ctx context.Context, tx *sql.Tx, reportID uuid.UUID, kind report.EventKind, deviceID *string, at time.Time) error {
@@ -123,6 +136,63 @@ func insertEvent(ctx context.Context, tx *sql.Tx, reportID uuid.UUID, kind repor
 
 func (repo *ReportRepository) GetByID(ctx context.Context, id uuid.UUID) (*report.ReportWithStats, error) {
 	return getByID(ctx, repo.db, id)
+}
+
+func (repo *ReportRepository) FindByClientID(ctx context.Context, clientID string) (*report.ReportWithStats, error) {
+	row := repo.db.QueryRowContext(ctx, `SELECT `+reportColumns+` FROM reports r WHERE r.client_id = $1`, clientID)
+	r, err := scanReport(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find report by client id: %w", err)
+	}
+	return r, nil
+}
+
+func (repo *ReportRepository) Events(ctx context.Context, reportID uuid.UUID) ([]ports.ReportEvent, error) {
+	byReport, err := eventsFor(ctx, repo.db, []uuid.UUID{reportID}, 100)
+	if err != nil {
+		return nil, err
+	}
+	return byReport[reportID], nil
+}
+
+func uuidStrings(ids []uuid.UUID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
+}
+
+// eventsFor loads the latest `perReport` events of several reports in one query.
+func eventsFor(ctx context.Context, db *sql.DB, ids []uuid.UUID, perReport int) (map[uuid.UUID][]ports.ReportEvent, error) {
+	out := map[uuid.UUID][]ports.ReportEvent{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT report_id, id, kind, created_at FROM (
+			SELECT report_id, id, kind, created_at,
+				row_number() OVER (PARTITION BY report_id ORDER BY created_at DESC, id DESC) AS n
+			FROM report_events WHERE report_id = ANY($1::uuid[])
+		) e WHERE n <= $2 ORDER BY report_id, created_at DESC, id DESC`, uuidStrings(ids), perReport)
+	if err != nil {
+		return nil, fmt.Errorf("query report events: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			reportID uuid.UUID
+			e        ports.ReportEvent
+		)
+		if err := rows.Scan(&reportID, &e.ID, &e.Kind, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan report event: %w", err)
+		}
+		out[reportID] = append(out[reportID], e)
+	}
+	return out, rows.Err()
 }
 
 type queryRower interface {
@@ -211,12 +281,25 @@ func severityStrings(ss []report.Severity) []string {
 	return out
 }
 
+// bboxSQL is the lat/lng range predicate (index-backed) for one box.
+func (b *queryBuilder) bboxSQL(latCol, lngCol string, box ports.BBox) string {
+	return "(" + latCol + " BETWEEN " + b.arg(box.MinLat) + " AND " + b.arg(box.MaxLat) +
+		" AND " + lngCol + " BETWEEN " + b.arg(box.MinLng) + " AND " + b.arg(box.MaxLng) + ")"
+}
+
 func (repo *ReportRepository) List(ctx context.Context, filter ports.ReportFilter) ([]report.ReportWithStats, error) {
 	var b queryBuilder
+	b.add("r.hidden_at IS NULL")
 	b.statuses(filter.Statuses, filter.Now)
 	if filter.BBox != nil {
-		b.add("r.latitude BETWEEN " + b.arg(filter.BBox.MinLat) + " AND " + b.arg(filter.BBox.MaxLat))
-		b.add("r.longitude BETWEEN " + b.arg(filter.BBox.MinLng) + " AND " + b.arg(filter.BBox.MaxLng))
+		b.add(b.bboxSQL("r.latitude", "r.longitude", *filter.BBox))
+	}
+	if len(filter.BBoxes) > 0 {
+		ors := make([]string, len(filter.BBoxes))
+		for i, box := range filter.BBoxes {
+			ors[i] = b.bboxSQL("r.latitude", "r.longitude", box)
+		}
+		b.add("(" + strings.Join(ors, " OR ") + ")")
 	}
 	b.inList("r.type", typeStrings(filter.Types))
 	b.inList("r.severity", severityStrings(filter.Severities))
@@ -242,6 +325,7 @@ func distanceSQL(latPH, lngPH string) string {
 
 func (repo *ReportRepository) Nearby(ctx context.Context, filter ports.NearbyFilter) ([]report.ReportWithStats, error) {
 	var b queryBuilder
+	b.add("r.hidden_at IS NULL")
 	b.statuses(filter.Statuses, filter.Now)
 
 	// Bounding-box prefilter so the lat/lng index narrows rows before the
@@ -266,6 +350,48 @@ func (repo *ReportRepository) Nearby(ctx context.Context, filter ports.NearbyFil
 	query := `SELECT ` + reportColumns + `, ` + dist + ` AS distance_m FROM reports r` + b.whereSQL() +
 		` ORDER BY ` + order + ` LIMIT ` + b.arg(filter.Limit)
 	return repo.queryReports(ctx, query, b.args, true)
+}
+
+// Aggregate groups reports into a lat/lng grid in SQL, so a zoomed-out map
+// receives one row per occupied cell rather than every report.
+func (repo *ReportRepository) Aggregate(ctx context.Context, filter ports.AggregateFilter) ([]ports.AggregateCell, error) {
+	var b queryBuilder
+	b.add("r.hidden_at IS NULL")
+	b.statuses(filter.Statuses, filter.Now)
+	b.add(b.bboxSQL("r.latitude", "r.longitude", filter.BBox))
+	b.inList("r.type", typeStrings(filter.Types))
+	b.inList("r.severity", severityStrings(filter.Severities))
+	cell := b.arg(filter.CellDeg)
+
+	query := `
+		SELECT AVG(r.latitude), AVG(r.longitude), COUNT(*),
+			COUNT(*) FILTER (WHERE r.severity IN ('high', 'critical')),
+			MAX(CASE r.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'moderate' THEN 2 ELSE 1 END),
+			MAX(r.updated_at)
+		FROM reports r` + b.whereSQL() + `
+		GROUP BY floor(r.latitude / ` + cell + `), floor(r.longitude / ` + cell + `)
+		ORDER BY COUNT(*) DESC
+		LIMIT ` + b.arg(filter.MaxCells)
+	rows, err := repo.db.QueryContext(ctx, query, b.args...)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate reports: %w", err)
+	}
+	defer rows.Close()
+
+	ranks := map[int]report.Severity{1: report.SeverityLow, 2: report.SeverityModerate, 3: report.SeverityHigh, 4: report.SeverityCritical}
+	out := []ports.AggregateCell{}
+	for rows.Next() {
+		var (
+			c    ports.AggregateCell
+			rank int
+		)
+		if err := rows.Scan(&c.Latitude, &c.Longitude, &c.Count, &c.SevereCount, &rank, &c.LatestUpdateAt); err != nil {
+			return nil, fmt.Errorf("scan aggregate cell: %w", err)
+		}
+		c.MaxSeverity = ranks[rank]
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (repo *ReportRepository) queryReports(ctx context.Context, query string, args []any, withDistance bool) ([]report.ReportWithStats, error) {

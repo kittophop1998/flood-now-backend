@@ -25,6 +25,9 @@ func (s Status) Valid() bool {
 	return false
 }
 
+// IsOpen reports whether a report in this state is still shown on the map.
+func (s Status) IsOpen() bool { return s == StatusActive || s == StatusPossiblyStale }
+
 // DefaultVisibleStatuses is what the map shows unless the caller asks
 // otherwise: resolved and expired reports don't pollute the default view.
 var DefaultVisibleStatuses = []Status{StatusActive, StatusPossiblyStale}
@@ -103,6 +106,8 @@ const (
 	EventConfirmed EventKind = "confirmed" // a still_active confirmation
 	EventResolved  EventKind = "resolved"
 	EventReopened  EventKind = "reopened"
+	EventHidden    EventKind = "hidden"   // moderation hid the report
+	EventUnhidden  EventKind = "unhidden" // moderation restored it
 )
 
 // ResolutionEvent returns the event emitted when resolved_at moves from
