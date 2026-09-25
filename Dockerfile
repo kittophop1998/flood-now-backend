@@ -1,22 +1,49 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.27.1-alpine AS build
+# =========================
+# Build stage
+# =========================
+FROM golang:1.27.1-alpine AS builder
+
 WORKDIR /src
 
+# Install certificates/git in case Go modules require HTTPS/git
+RUN apk add --no-cache ca-certificates git
+
+# Copy dependency files first for Docker layer caching
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
 
+RUN go mod download
+
+# Copy application source
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
 
+# Build static Go binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/api \
+    ./cmd/api
+
+
+# =========================
+# Runtime stage
+# =========================
 FROM alpine:3.22 AS runtime
+
 RUN apk add --no-cache ca-certificates && \
     adduser -D -u 10001 floodnow
-COPY --from=build /out/api /usr/local/bin/api
+
+WORKDIR /app
+
+COPY --from=builder /out/api /usr/local/bin/api
 
 USER floodnow
-# Railway supplies PORT at runtime; 4000 is the local/default container port.
+
+# Railway overrides PORT automatically at runtime
 ENV PORT=4000
-EXPOSE ${PORT}
+
+EXPOSE 4000
+
 ENTRYPOINT ["/usr/local/bin/api"]
