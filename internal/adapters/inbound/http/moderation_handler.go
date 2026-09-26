@@ -87,15 +87,16 @@ func (h *ModerationHandler) Apply(c *gin.Context) {
 
 // ConfigHandler serves non-secret runtime configuration for the web app.
 type ConfigHandler struct {
-	donation *donation.Config
+	donation    *donation.Config
+	gistdaFlood bool
 }
 
-func NewConfigHandler(d *donation.Config) *ConfigHandler {
-	return &ConfigHandler{donation: d}
+func NewConfigHandler(d *donation.Config, gistdaFlood bool) *ConfigHandler {
+	return &ConfigHandler{donation: d, gistdaFlood: gistdaFlood}
 }
 
 func (h *ConfigHandler) Public(c *gin.Context) {
-	out := publicConfigResponse{}
+	out := publicConfigResponse{GISTDAFlood: h.gistdaFlood}
 	if d := h.donation; d != nil {
 		out.Donation = &donationConfigResponse{PromptPayID: d.PromptPayID, IDType: string(d.IDType), RecipientName: d.RecipientName}
 	}

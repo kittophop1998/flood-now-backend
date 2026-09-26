@@ -12,6 +12,7 @@ import (
 	"floodnow-api/internal/domain/follow"
 	"floodnow-api/internal/domain/importantplace"
 	"floodnow-api/internal/domain/moderation"
+	"floodnow-api/internal/domain/officialflood"
 	"floodnow-api/internal/domain/place"
 	"floodnow-api/internal/domain/report"
 	"floodnow-api/internal/domain/route"
@@ -315,4 +316,11 @@ type Geocoder interface {
 	Search(ctx context.Context, query, lang string, near *BBox, limit int) ([]place.Place, error)
 	// Reverse returns nil when nothing is known at that point.
 	Reverse(ctx context.Context, lat, lng float64, lang string) (*place.Place, error)
+}
+
+// FloodAreaProvider fetches one period's official flood areas (GISTDA) in
+// full. Callers cache the result; the provider is never called per map move.
+// Failures are UNAVAILABLE.
+type FloodAreaProvider interface {
+	FloodAreas(ctx context.Context, period officialflood.Period) (*officialflood.Snapshot, error)
 }

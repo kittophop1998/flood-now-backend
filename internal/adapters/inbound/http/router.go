@@ -27,6 +27,7 @@ type Deps struct {
 	AnnouncementHandler   *AnnouncementHandler
 	ModerationHandler     *ModerationHandler
 	ConfigHandler         *ConfigHandler
+	OfficialFloodHandler  *OfficialFloodHandler
 	WebOrigin             string
 	// AdminToken gates /api/v1/admin/*. Empty disables those routes.
 	AdminToken string
@@ -86,6 +87,8 @@ func NewRouter(deps Deps) *gin.Engine {
 
 		v1.GET("/announcements", deps.AnnouncementHandler.List)
 		v1.GET("/announcements/:id", deps.AnnouncementHandler.Get)
+
+		v1.GET("/official/gistda/flood", deps.OfficialFloodHandler.Get)
 	}
 
 	// Operator endpoints: moderation queue, announcements, important places.

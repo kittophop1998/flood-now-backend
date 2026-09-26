@@ -12,6 +12,7 @@ import (
 
 	inboundhttp "floodnow-api/internal/adapters/inbound/http"
 	"floodnow-api/internal/adapters/outbound/geocoding"
+	"floodnow-api/internal/adapters/outbound/gistda"
 	"floodnow-api/internal/adapters/outbound/postgres"
 	"floodnow-api/internal/adapters/outbound/routing"
 	"floodnow-api/internal/adapters/outbound/storage"
@@ -19,6 +20,7 @@ import (
 	appfollow "floodnow-api/internal/application/follow"
 	appimportantplace "floodnow-api/internal/application/importantplace"
 	appmoderation "floodnow-api/internal/application/moderation"
+	appofficialflood "floodnow-api/internal/application/officialflood"
 	appplace "floodnow-api/internal/application/place"
 	appreport "floodnow-api/internal/application/report"
 	approute "floodnow-api/internal/application/route"
@@ -75,6 +77,12 @@ func run() error {
 	if donationCfg == nil && cfg.DonationEnabled != "" && cfg.DonationEnabled != "false" {
 		log.Printf("donation disabled: DONATION_ENABLED=%q but PROMPTPAY_ID is missing or invalid", cfg.DonationEnabled)
 	}
+	if cfg.GISTDAWarning != "" {
+		log.Printf("GISTDA config: %s", cfg.GISTDAWarning)
+	}
+	if !cfg.GISTDA.Enabled {
+		log.Printf("GISTDA flood layer disabled (needs GISTDA_ENABLED=true, GISTDA_BASE_URL and GISTDA_API_KEY)")
+	}
 	if cfg.AdminToken == "" {
 		log.Printf("admin API disabled (ADMIN_TOKEN not set)")
 	}
@@ -94,6 +102,14 @@ func run() error {
 	announcementService := appannouncement.NewService(postgres.NewAnnouncementRepository(db), realClock)
 	moderationService := appmoderation.NewService(postgres.NewModerationRepository(db), reportRepo, realClock, modPolicy)
 
+	// nil when GISTDA isn't configured: the layer endpoint answers 404 and
+	// /config/public reports it off.
+	var floodService *appofficialflood.Service
+	if cfg.GISTDA.Enabled {
+		provider := gistda.New(cfg.GISTDA.BaseURL, cfg.GISTDA.APIKey, 25*time.Second, realClock)
+		floodService = appofficialflood.NewService(provider, realClock, cfg.GISTDA.CacheTTL)
+	}
+
 	presenter := inboundhttp.NewReportPresenter(realClock, cfg.ImageKitBaseURL, storage.ImageURL)
 
 	router := inboundhttp.NewRouter(inboundhttp.Deps{
@@ -107,7 +123,8 @@ func run() error {
 		ImportantPlaceHandler: inboundhttp.NewImportantPlaceHandler(importantPlaceService),
 		AnnouncementHandler:   inboundhttp.NewAnnouncementHandler(announcementService, realClock),
 		ModerationHandler:     inboundhttp.NewModerationHandler(moderationService, presenter),
-		ConfigHandler:         inboundhttp.NewConfigHandler(donationCfg),
+		ConfigHandler:         inboundhttp.NewConfigHandler(donationCfg, floodService != nil),
+		OfficialFloodHandler:  inboundhttp.NewOfficialFloodHandler(floodService),
 		WebOrigin:             cfg.WebOrigin,
 		AdminToken:            cfg.AdminToken,
 	})

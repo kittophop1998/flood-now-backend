@@ -7,8 +7,11 @@ import (
 
 	appannouncement "floodnow-api/internal/application/announcement"
 	appplace "floodnow-api/internal/application/importantplace"
+	appflood "floodnow-api/internal/application/officialflood"
 	domainannouncement "floodnow-api/internal/domain/announcement"
+	"floodnow-api/internal/domain/apperr"
 	domainplace "floodnow-api/internal/domain/importantplace"
+	domainflood "floodnow-api/internal/domain/officialflood"
 	"floodnow-api/internal/ports"
 )
 
@@ -214,4 +217,42 @@ func (h *AnnouncementHandler) Delete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// OfficialFloodHandler serves the official GISTDA flood-area layer. With no
+// service (GISTDA not configured) the endpoint answers 404.
+type OfficialFloodHandler struct {
+	service *appflood.Service
+}
+
+func NewOfficialFloodHandler(service *appflood.Service) *OfficialFloodHandler {
+	return &OfficialFloodHandler{service: service}
+}
+
+func (h *OfficialFloodHandler) Get(c *gin.Context) {
+	if h.service == nil {
+		writeError(c, apperr.NotFound("the GISTDA flood layer is not configured"))
+		return
+	}
+	p := newQueryParser(c)
+	period := domainflood.Period(c.DefaultQuery("period", string(domainflood.DefaultPeriod)))
+	if !period.Valid() {
+		p.fields["period"] = "must be one of 1d, 3d, 7d, 30d"
+	}
+	bbox := p.bbox()
+	if err := p.err("flood layer query is invalid"); err != nil {
+		writeError(c, err)
+		return
+	}
+	var view *domainflood.Bounds
+	if bbox != nil {
+		view = &domainflood.Bounds{MinLng: bbox.MinLng, MinLat: bbox.MinLat, MaxLng: bbox.MaxLng, MaxLat: bbox.MaxLat}
+	}
+	layer, err := h.service.Get(c.Request.Context(), period, view)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "public, max-age=60")
+	c.JSON(http.StatusOK, toFloodLayerResponse(layer))
 }

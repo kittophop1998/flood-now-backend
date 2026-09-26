@@ -5,9 +5,12 @@ import (
 
 	"github.com/google/uuid"
 
+	appflood "floodnow-api/internal/application/officialflood"
+
 	domainannouncement "floodnow-api/internal/domain/announcement"
 	domainfollow "floodnow-api/internal/domain/follow"
 	domainplace "floodnow-api/internal/domain/importantplace"
+	domainflood "floodnow-api/internal/domain/officialflood"
 	domainreport "floodnow-api/internal/domain/report"
 	domainsos "floodnow-api/internal/domain/sos"
 )
@@ -659,4 +662,62 @@ type donationConfigResponse struct {
 
 type publicConfigResponse struct {
 	Donation *donationConfigResponse `json:"donation"`
+	// GISTDAFlood is true when the official GISTDA flood layer is configured.
+	GISTDAFlood bool `json:"gistda_flood"`
+}
+
+// --- Official GISTDA flood layer ---
+
+type floodAreaProperties struct {
+	Ref        int        `json:"ref"`
+	ID         string     `json:"id,omitempty"`
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+}
+
+type floodAreaFeature struct {
+	Type       string              `json:"type"`
+	Geometry   floodAreaGeometry   `json:"geometry"`
+	Properties floodAreaProperties `json:"properties"`
+}
+
+type floodAreaGeometry struct {
+	Type        string                `json:"type"`
+	Coordinates []domainflood.Polygon `json:"coordinates"`
+}
+
+type floodAreaCollection struct {
+	Type     string             `json:"type"`
+	Features []floodAreaFeature `json:"features"`
+}
+
+type floodLayerResponse struct {
+	Source     string              `json:"source"`
+	Period     string              `json:"period"`
+	ObservedAt *time.Time          `json:"observed_at"`
+	FetchedAt  time.Time           `json:"fetched_at"`
+	Stale      bool                `json:"stale"`
+	SourceURL  string              `json:"source_url"`
+	HasMore    bool                `json:"has_more"`
+	Areas      floodAreaCollection `json:"areas"`
+}
+
+func toFloodLayerResponse(l *appflood.Layer) floodLayerResponse {
+	features := make([]floodAreaFeature, 0, len(l.Areas))
+	for _, a := range l.Areas {
+		features = append(features, floodAreaFeature{
+			Type:       "Feature",
+			Geometry:   floodAreaGeometry{Type: "MultiPolygon", Coordinates: a.Polygons},
+			Properties: floodAreaProperties{Ref: a.Ref, ID: a.ID, ObservedAt: utcPtr(a.ObservedAt)},
+		})
+	}
+	return floodLayerResponse{
+		Source:     domainflood.SourceName,
+		Period:     string(l.Period),
+		ObservedAt: utcPtr(l.ObservedAt),
+		FetchedAt:  l.FetchedAt.UTC(),
+		Stale:      l.Stale,
+		SourceURL:  domainflood.SourceURL,
+		HasMore:    l.HasMore,
+		Areas:      floodAreaCollection{Type: "FeatureCollection", Features: features},
+	}
 }

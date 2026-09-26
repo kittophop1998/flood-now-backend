@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -49,6 +50,19 @@ type Config struct {
 	DonationEnabled string
 	PromptPayID     string
 	PromptPayName   string
+
+	// Official GISTDA flood-area layer. Enabled only when GISTDA_ENABLED=true
+	// and the base URL/key are valid; otherwise the layer is off and
+	// GISTDAWarning says why (the rest of the API is unaffected).
+	GISTDA        GISTDAConfig
+	GISTDAWarning string
+}
+
+type GISTDAConfig struct {
+	Enabled  bool
+	BaseURL  string
+	APIKey   string // secret: never logged or sent to clients
+	CacheTTL time.Duration
 }
 
 // Load reads configuration from the environment, loading a .env file first
@@ -131,11 +145,48 @@ func Load() (*Config, error) {
 		*it.dst = v
 	}
 
+	cfg.GISTDA, cfg.GISTDAWarning = loadGISTDA()
+
 	if cfg.R2Endpoint == "" && cfg.R2AccountID != "" {
 		cfg.R2Endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.R2AccountID)
 	}
 
 	return cfg, nil
+}
+
+const defaultGISTDACacheTTL = 15 * time.Minute
+
+// loadGISTDA never fails the boot: any missing or invalid value disables
+// only the GISTDA layer, with a warning for the log.
+func loadGISTDA() (GISTDAConfig, string) {
+	g := GISTDAConfig{
+		BaseURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("GISTDA_BASE_URL")), "/"),
+		APIKey:   strings.TrimSpace(os.Getenv("GISTDA_API_KEY")),
+		CacheTTL: defaultGISTDACacheTTL,
+	}
+	var warnings []string
+	if raw := os.Getenv("GISTDA_CACHE_TTL_MINUTES"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 24*60 {
+			warnings = append(warnings, fmt.Sprintf("GISTDA_CACHE_TTL_MINUTES=%q is invalid (1–1440), using 15", raw))
+		} else {
+			g.CacheTTL = time.Duration(n) * time.Minute
+		}
+	}
+	if os.Getenv("GISTDA_ENABLED") != "true" {
+		return g, strings.Join(warnings, "; ")
+	}
+	u, err := url.Parse(g.BaseURL)
+	urlOK := g.BaseURL != "" && err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
+	if !urlOK {
+		warnings = append(warnings, "GISTDA_BASE_URL is missing or not an http(s) URL")
+	}
+	if g.APIKey == "" {
+		warnings = append(warnings, "GISTDA_API_KEY is missing")
+	}
+	// A bad TTL only falls back to the default; it doesn't disable the layer.
+	g.Enabled = urlOK && g.APIKey != ""
+	return g, strings.Join(warnings, "; ")
 }
 
 func getEnv(key, fallback string) string {
