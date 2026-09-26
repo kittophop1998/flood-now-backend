@@ -89,14 +89,15 @@ func (h *ModerationHandler) Apply(c *gin.Context) {
 type ConfigHandler struct {
 	donation    *donation.Config
 	gistdaFlood bool
+	dohCCTV     bool
 }
 
-func NewConfigHandler(d *donation.Config, gistdaFlood bool) *ConfigHandler {
-	return &ConfigHandler{donation: d, gistdaFlood: gistdaFlood}
+func NewConfigHandler(d *donation.Config, gistdaFlood, dohCCTV bool) *ConfigHandler {
+	return &ConfigHandler{donation: d, gistdaFlood: gistdaFlood, dohCCTV: dohCCTV}
 }
 
 func (h *ConfigHandler) Public(c *gin.Context) {
-	out := publicConfigResponse{GISTDAFlood: h.gistdaFlood}
+	out := publicConfigResponse{GISTDAFlood: h.gistdaFlood, DOHCCTV: h.dohCCTV}
 	if d := h.donation; d != nil {
 		out.Donation = &donationConfigResponse{PromptPayID: d.PromptPayID, IDType: string(d.IDType), RecipientName: d.RecipientName}
 	}

@@ -43,7 +43,7 @@ func fakeGISTDA(t *testing.T) *httptest.Server {
 func newFloodRouter(service *appflood.Service) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	return NewRouter(Deps{
-		ConfigHandler:        NewConfigHandler(nil, service != nil),
+		ConfigHandler:        NewConfigHandler(nil, service != nil, false),
 		OfficialFloodHandler: NewOfficialFloodHandler(service),
 		WebOrigin:            "http://localhost:3000",
 	})

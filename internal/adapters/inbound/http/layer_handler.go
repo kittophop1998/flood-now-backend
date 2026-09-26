@@ -6,10 +6,12 @@ import (
 	"github.com/gin-gonic/gin"
 
 	appannouncement "floodnow-api/internal/application/announcement"
+	appcctv "floodnow-api/internal/application/cctv"
 	appplace "floodnow-api/internal/application/importantplace"
 	appflood "floodnow-api/internal/application/officialflood"
 	domainannouncement "floodnow-api/internal/domain/announcement"
 	"floodnow-api/internal/domain/apperr"
+	domaincctv "floodnow-api/internal/domain/cctv"
 	domainplace "floodnow-api/internal/domain/importantplace"
 	domainflood "floodnow-api/internal/domain/officialflood"
 	"floodnow-api/internal/ports"
@@ -298,4 +300,96 @@ func (h *OfficialFloodHandler) Get(c *gin.Context) {
 	}
 	c.Header("Cache-Control", "public, max-age=60")
 	c.JSON(http.StatusOK, toFloodLayerResponse(layer))
+}
+
+// CCTVHandler serves the official DOH Highway Traffic camera layer (camera
+// metadata only). With no service (layer not enabled) every endpoint
+// answers 404.
+type CCTVHandler struct {
+	service *appcctv.Service
+}
+
+func NewCCTVHandler(service *appcctv.Service) *CCTVHandler {
+	return &CCTVHandler{service: service}
+}
+
+func (h *CCTVHandler) available(c *gin.Context) bool {
+	if h.service == nil {
+		writeError(c, apperr.NotFound("the highway camera layer is not configured"))
+		return false
+	}
+	return true
+}
+
+func (h *CCTVHandler) List(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	p := newQueryParser(c)
+	bbox := p.bbox()
+	limit := p.int("limit")
+	if limit < 0 || limit > appcctv.MaxLimit {
+		p.fields["limit"] = "must be between 1 and 1000"
+	}
+	if err := p.err("camera query is invalid"); err != nil {
+		writeError(c, err)
+		return
+	}
+	var view *domaincctv.Bounds
+	if bbox != nil {
+		view = &domaincctv.Bounds{MinLng: bbox.MinLng, MinLat: bbox.MinLat, MaxLng: bbox.MaxLng, MaxLat: bbox.MaxLat}
+	}
+	res, err := h.service.List(c.Request.Context(), view, limit)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	out := make([]cctvCameraResponse, 0, len(res.Cameras))
+	for _, cam := range res.Cameras {
+		out = append(out, toCCTVCameraResponse(cam, nil))
+	}
+	c.Header("Cache-Control", "public, max-age=300")
+	c.JSON(http.StatusOK, cctvListResponse{cctvSourceResponse: toCCTVSource(res.Snapshot), Cameras: out, HasMore: res.HasMore})
+}
+
+func (h *CCTVHandler) Nearby(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	p := newQueryParser(c)
+	in := appcctv.NearbyInput{
+		Latitude:  p.float("lat", true),
+		Longitude: p.float("lng", true),
+		RadiusM:   p.float("radius_m", false),
+		Limit:     p.int("limit"),
+	}
+	if err := p.err("nearby camera query is invalid"); err != nil {
+		writeError(c, err)
+		return
+	}
+	res, err := h.service.Nearby(c.Request.Context(), in)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	out := make([]cctvCameraResponse, 0, len(res.Cameras))
+	for _, n := range res.Cameras {
+		d := n.DistanceM
+		out = append(out, toCCTVCameraResponse(n.Camera, &d))
+	}
+	c.Header("Cache-Control", "public, max-age=300")
+	c.JSON(http.StatusOK, cctvListResponse{cctvSourceResponse: toCCTVSource(res.Snapshot), Cameras: out})
+}
+
+func (h *CCTVHandler) Get(c *gin.Context) {
+	if !h.available(c) {
+		return
+	}
+	res, err := h.service.Get(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "public, max-age=300")
+	c.JSON(http.StatusOK, cctvGetResponse{cctvSourceResponse: toCCTVSource(res.Snapshot), Camera: toCCTVCameraResponse(res.Camera, nil)})
 }

@@ -1,13 +1,16 @@
 package http
 
 import (
+	"math"
 	"time"
 
 	"github.com/google/uuid"
 
+	appcctv "floodnow-api/internal/application/cctv"
 	appflood "floodnow-api/internal/application/officialflood"
 
 	domainannouncement "floodnow-api/internal/domain/announcement"
+	domaincctv "floodnow-api/internal/domain/cctv"
 	domainfollow "floodnow-api/internal/domain/follow"
 	domainplace "floodnow-api/internal/domain/importantplace"
 	domainflood "floodnow-api/internal/domain/officialflood"
@@ -692,6 +695,8 @@ type publicConfigResponse struct {
 	Donation *donationConfigResponse `json:"donation"`
 	// GISTDAFlood is true when the official GISTDA flood layer is configured.
 	GISTDAFlood bool `json:"gistda_flood"`
+	// DOHCCTV is true when the official DOH highway camera layer is enabled.
+	DOHCCTV bool `json:"doh_cctv"`
 }
 
 // --- Official GISTDA flood layer ---
@@ -747,5 +752,77 @@ func toFloodLayerResponse(l *appflood.Layer) floodLayerResponse {
 		SourceURL:  domainflood.SourceURL,
 		HasMore:    l.HasMore,
 		Areas:      floodAreaCollection{Type: "FeatureCollection", Features: features},
+	}
+}
+
+// --- Official DOH highway cameras ---
+
+// cctvCameraResponse carries only normalized fields; optional ones are
+// omitted when the provider didn't give them. No image/stream URL exists
+// while every camera is external_link.
+type cctvCameraResponse struct {
+	ID             string   `json:"id"`
+	ExternalID     string   `json:"external_id"`
+	Name           string   `json:"name"`
+	Latitude       float64  `json:"latitude"`
+	Longitude      float64  `json:"longitude"`
+	Provider       string   `json:"provider"`
+	HighwayNumber  string   `json:"highway_number,omitempty"`
+	ControlSection string   `json:"control_section,omitempty"`
+	KMMarker       string   `json:"km_marker,omitempty"`
+	Mode           string   `json:"mode"`
+	ExternalURL    string   `json:"external_url"`
+	Status         string   `json:"status"`
+	DistanceM      *float64 `json:"distance_m,omitempty"`
+}
+
+type cctvSourceResponse struct {
+	Source     string    `json:"source"`
+	SourceName string    `json:"source_name"`
+	SourceURL  string    `json:"source_url"`
+	FetchedAt  time.Time `json:"fetched_at"`
+	Stale      bool      `json:"stale"`
+}
+
+type cctvListResponse struct {
+	cctvSourceResponse
+	Cameras []cctvCameraResponse `json:"cameras"`
+	HasMore bool                 `json:"has_more"`
+}
+
+type cctvGetResponse struct {
+	cctvSourceResponse
+	Camera cctvCameraResponse `json:"camera"`
+}
+
+func toCCTVSource(s appcctv.Snapshot) cctvSourceResponse {
+	return cctvSourceResponse{
+		Source:     domaincctv.ProviderDOH,
+		SourceName: domaincctv.SourceName,
+		SourceURL:  domaincctv.SourceURL,
+		FetchedAt:  s.FetchedAt.UTC(),
+		Stale:      s.Stale,
+	}
+}
+
+func toCCTVCameraResponse(c domaincctv.Camera, distanceM *float64) cctvCameraResponse {
+	if distanceM != nil {
+		d := math.Round(*distanceM)
+		distanceM = &d
+	}
+	return cctvCameraResponse{
+		ID:             c.ID,
+		ExternalID:     c.ExternalID,
+		Name:           c.Name,
+		Latitude:       c.Latitude,
+		Longitude:      c.Longitude,
+		Provider:       c.Provider,
+		HighwayNumber:  c.HighwayNumber,
+		ControlSection: c.ControlSection,
+		KMMarker:       c.KMMarker,
+		Mode:           string(c.Mode),
+		ExternalURL:    c.ExternalURL,
+		Status:         string(c.Status),
+		DistanceM:      distanceM,
 	}
 }

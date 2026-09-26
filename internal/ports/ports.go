@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"floodnow-api/internal/domain/announcement"
+	"floodnow-api/internal/domain/cctv"
 	"floodnow-api/internal/domain/follow"
 	"floodnow-api/internal/domain/importantplace"
 	"floodnow-api/internal/domain/moderation"
@@ -328,4 +329,11 @@ type Geocoder interface {
 // Failures are UNAVAILABLE.
 type FloodAreaProvider interface {
 	FloodAreas(ctx context.Context, period officialflood.Period) (*officialflood.Snapshot, error)
+}
+
+// CCTVProvider fetches the provider's full camera catalog (metadata only —
+// never images). Callers cache the result; the provider is never called per
+// map move. Failures are UNAVAILABLE.
+type CCTVProvider interface {
+	Cameras(ctx context.Context) (*cctv.Catalog, error)
 }

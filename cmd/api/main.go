@@ -11,12 +11,14 @@ import (
 	"time"
 
 	inboundhttp "floodnow-api/internal/adapters/inbound/http"
+	"floodnow-api/internal/adapters/outbound/dohtraffic"
 	"floodnow-api/internal/adapters/outbound/geocoding"
 	"floodnow-api/internal/adapters/outbound/gistda"
 	"floodnow-api/internal/adapters/outbound/postgres"
 	"floodnow-api/internal/adapters/outbound/routing"
 	"floodnow-api/internal/adapters/outbound/storage"
 	appannouncement "floodnow-api/internal/application/announcement"
+	appcctv "floodnow-api/internal/application/cctv"
 	appfollow "floodnow-api/internal/application/follow"
 	appimportantplace "floodnow-api/internal/application/importantplace"
 	appmoderation "floodnow-api/internal/application/moderation"
@@ -83,6 +85,12 @@ func run() error {
 	if !cfg.GISTDA.Enabled {
 		log.Printf("GISTDA flood layer disabled (needs GISTDA_ENABLED=true, GISTDA_BASE_URL and GISTDA_API_KEY)")
 	}
+	if cfg.DOHCCTVWarning != "" {
+		log.Printf("DOH CCTV config: %s", cfg.DOHCCTVWarning)
+	}
+	if !cfg.DOHCCTV.Enabled {
+		log.Printf("DOH CCTV layer disabled (needs DOH_CCTV_ENABLED=true and a valid DOH_CCTV_BASE_URL)")
+	}
 	if cfg.AdminToken == "" {
 		log.Printf("admin API disabled (ADMIN_TOKEN not set)")
 	}
@@ -110,6 +118,13 @@ func run() error {
 		floodService = appofficialflood.NewService(provider, realClock, cfg.GISTDA.CacheTTL)
 	}
 
+	// nil when the camera layer is off: its endpoints answer 404 and
+	// /config/public reports it off.
+	var cctvService *appcctv.Service
+	if cfg.DOHCCTV.Enabled {
+		cctvService = appcctv.NewService(dohtraffic.New(cfg.DOHCCTV.BaseURL, 20*time.Second, realClock), realClock, cfg.DOHCCTV.CacheTTL)
+	}
+
 	presenter := inboundhttp.NewReportPresenter(realClock, cfg.ImageKitBaseURL, storage.ImageURL)
 
 	router := inboundhttp.NewRouter(inboundhttp.Deps{
@@ -123,8 +138,9 @@ func run() error {
 		ImportantPlaceHandler: inboundhttp.NewImportantPlaceHandler(importantPlaceService),
 		AnnouncementHandler:   inboundhttp.NewAnnouncementHandler(announcementService, realClock),
 		ModerationHandler:     inboundhttp.NewModerationHandler(moderationService, presenter),
-		ConfigHandler:         inboundhttp.NewConfigHandler(donationCfg, floodService != nil),
+		ConfigHandler:         inboundhttp.NewConfigHandler(donationCfg, floodService != nil, cctvService != nil),
 		OfficialFloodHandler:  inboundhttp.NewOfficialFloodHandler(floodService),
+		CCTVHandler:           inboundhttp.NewCCTVHandler(cctvService),
 		WebOrigin:             cfg.WebOrigin,
 		AdminToken:            cfg.AdminToken,
 	})

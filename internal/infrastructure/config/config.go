@@ -56,6 +56,18 @@ type Config struct {
 	// GISTDAWarning says why (the rest of the API is unaffected).
 	GISTDA        GISTDAConfig
 	GISTDAWarning string
+
+	// Official DOH Highway Traffic camera layer. Enabled only when
+	// DOH_CCTV_ENABLED=true and the base URL is valid; otherwise the layer
+	// is off and DOHCCTVWarning says why.
+	DOHCCTV        DOHCCTVConfig
+	DOHCCTVWarning string
+}
+
+type DOHCCTVConfig struct {
+	Enabled  bool
+	BaseURL  string
+	CacheTTL time.Duration
 }
 
 type GISTDAConfig struct {
@@ -146,6 +158,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg.GISTDA, cfg.GISTDAWarning = loadGISTDA()
+	cfg.DOHCCTV, cfg.DOHCCTVWarning = loadDOHCCTV()
 
 	if cfg.R2Endpoint == "" && cfg.R2AccountID != "" {
 		cfg.R2Endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.R2AccountID)
@@ -187,6 +200,39 @@ func loadGISTDA() (GISTDAConfig, string) {
 	// A bad TTL only falls back to the default; it doesn't disable the layer.
 	g.Enabled = urlOK && g.APIKey != ""
 	return g, strings.Join(warnings, "; ")
+}
+
+const (
+	defaultDOHCCTVBaseURL  = "https://highwaytraffic.go.th"
+	defaultDOHCCTVCacheTTL = 60 * time.Minute
+)
+
+// loadDOHCCTV never fails the boot: an invalid value disables only the
+// camera layer (bad TTL falls back to the default), with a warning.
+func loadDOHCCTV() (DOHCCTVConfig, string) {
+	d := DOHCCTVConfig{
+		BaseURL:  strings.TrimRight(strings.TrimSpace(getEnv("DOH_CCTV_BASE_URL", defaultDOHCCTVBaseURL)), "/"),
+		CacheTTL: defaultDOHCCTVCacheTTL,
+	}
+	var warnings []string
+	if raw := os.Getenv("DOH_CCTV_CACHE_TTL_MINUTES"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 5 || n > 24*60 {
+			warnings = append(warnings, fmt.Sprintf("DOH_CCTV_CACHE_TTL_MINUTES=%q is invalid (5–1440), using 60", raw))
+		} else {
+			d.CacheTTL = time.Duration(n) * time.Minute
+		}
+	}
+	if os.Getenv("DOH_CCTV_ENABLED") != "true" {
+		return d, strings.Join(warnings, "; ")
+	}
+	u, err := url.Parse(d.BaseURL)
+	if d.BaseURL == "" || err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		warnings = append(warnings, "DOH_CCTV_BASE_URL is not an http(s) URL")
+		return d, strings.Join(warnings, "; ")
+	}
+	d.Enabled = true
+	return d, strings.Join(warnings, "; ")
 }
 
 func getEnv(key, fallback string) string {
