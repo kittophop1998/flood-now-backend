@@ -84,6 +84,9 @@ func NewRouter(deps Deps) *gin.Engine {
 
 		v1.GET("/important-places", deps.ImportantPlaceHandler.List)
 		v1.GET("/important-places/:id", deps.ImportantPlaceHandler.Get)
+		v1.POST("/important-places", deps.ImportantPlaceHandler.CreateCommunity)
+		v1.PATCH("/important-places/:id", deps.ImportantPlaceHandler.UpdateOwn)
+		v1.DELETE("/important-places/:id", deps.ImportantPlaceHandler.DeleteOwn)
 
 		v1.GET("/announcements", deps.AnnouncementHandler.List)
 		v1.GET("/announcements/:id", deps.AnnouncementHandler.Get)

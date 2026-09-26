@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -21,12 +22,12 @@ func NewImportantPlaceRepository(db *sql.DB) *ImportantPlaceRepository {
 }
 
 const importantPlaceColumns = `p.id, p.name, p.category, p.latitude, p.longitude, p.address, p.status,
-	p.description, p.contact, p.source, p.created_at, p.updated_at`
+	p.description, p.contact, p.source, p.created_by_device, p.created_at, p.updated_at`
 
 func scanImportantPlace(row rowScanner) (*importantplace.Place, error) {
 	var p importantplace.Place
 	if err := row.Scan(&p.ID, &p.Name, &p.Category, &p.Latitude, &p.Longitude, &p.Address, &p.Status,
-		&p.Description, &p.Contact, &p.Source, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.Description, &p.Contact, &p.Source, &p.CreatedByDevice, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &p, nil
@@ -78,9 +79,11 @@ func (repo *ImportantPlaceRepository) Get(ctx context.Context, id uuid.UUID) (*i
 
 func (repo *ImportantPlaceRepository) Create(ctx context.Context, p *importantplace.Place) error {
 	_, err := repo.db.ExecContext(ctx, `
-		INSERT INTO important_places (id, name, category, latitude, longitude, address, status, description, contact, source, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-		p.ID, p.Name, p.Category, p.Latitude, p.Longitude, p.Address, p.Status, p.Description, p.Contact, p.Source, p.CreatedAt, p.UpdatedAt)
+		INSERT INTO important_places (id, name, category, latitude, longitude, address, status, description, contact, source,
+			created_by_device, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		p.ID, p.Name, p.Category, p.Latitude, p.Longitude, p.Address, p.Status, p.Description, p.Contact, p.Source,
+		p.CreatedByDevice, p.CreatedAt, p.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert important place: %w", err)
 	}
@@ -106,4 +109,14 @@ func (repo *ImportantPlaceRepository) Delete(ctx context.Context, id uuid.UUID) 
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+func (repo *ImportantPlaceRepository) CountByDeviceSince(ctx context.Context, deviceID string, since time.Time) (int, error) {
+	var n int
+	err := repo.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM important_places WHERE created_by_device = $1 AND created_at >= $2`, deviceID, since).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count important places by device: %w", err)
+	}
+	return n, nil
 }

@@ -1,6 +1,7 @@
-// Package importantplace holds curated emergency / important places
-// (hospitals, shelters, boat points…) maintained by an operator. Unlike
-// community reports they don't expire; their status is set explicitly.
+// Package importantplace holds emergency / important places (hospitals,
+// shelters, boat points…), either curated by an operator or added by anyone
+// from the app. Unlike community reports they don't expire; their status is
+// set explicitly.
 package importantplace
 
 import (
@@ -63,8 +64,37 @@ type Place struct {
 	Description *string
 	Contact     *string
 	Source      *string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// CreatedByDevice is the anonymous device that added the place; nil for
+	// operator-curated places. Never exposed by the API.
+	CreatedByDevice *string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type Origin string
+
+const (
+	OriginOfficial  Origin = "official"
+	OriginCommunity Origin = "community"
+)
+
+func (p Place) Origin() Origin {
+	if p.CreatedByDevice != nil {
+		return OriginCommunity
+	}
+	return OriginOfficial
+}
+
+// OwnedBy reports whether deviceID added this place.
+func (p Place) OwnedBy(deviceID string) bool {
+	return deviceID != "" && p.CreatedByDevice != nil && *p.CreatedByDevice == deviceID
+}
+
+func ValidateDeviceID(deviceID string) error {
+	if len(deviceID) < 8 || len(deviceID) > 128 {
+		return apperr.Validation("device_id is invalid", map[string]string{"device_id": "must be between 8 and 128 characters"})
+	}
+	return nil
 }
 
 // Fields is the editable part of a place; nil means "unchanged" on update.

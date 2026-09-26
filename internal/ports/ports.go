@@ -252,6 +252,8 @@ type ImportantPlaceRepository interface {
 	Create(ctx context.Context, p *importantplace.Place) error
 	Update(ctx context.Context, p *importantplace.Place) error
 	Delete(ctx context.Context, id uuid.UUID) (bool, error)
+	// CountByDeviceSince counts places the device added at or after since.
+	CountByDeviceSince(ctx context.Context, deviceID string, since time.Time) (int, error)
 }
 
 // AnnouncementFilter selects announcements. Published-only unless

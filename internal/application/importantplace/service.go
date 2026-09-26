@@ -1,10 +1,12 @@
 // Package importantplace contains the important-places layer use cases:
-// public viewport reads and operator CRUD.
+// public viewport reads, places added by anyone from the app, and operator
+// CRUD.
 package importantplace
 
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -16,6 +18,8 @@ import (
 const (
 	DefaultListLimit = 300
 	MaxListLimit     = 500
+	// MaxCommunityPerDevicePerDay caps how many places one device can add.
+	MaxCommunityPerDevicePerDay = 10
 )
 
 type Service struct {
@@ -114,5 +118,74 @@ func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 		return apperr.NotFound("important place not found")
 	}
 	log.Printf("admin: important place %s deleted", id)
+	return nil
+}
+
+// CreateCommunity adds a place on behalf of an anonymous device. It is shown
+// as community-added (not curated); only that device or an operator can
+// change it. Community places carry no source.
+func (s *Service) CreateCommunity(ctx context.Context, deviceID string, in domainplace.Fields) (*domainplace.Place, error) {
+	if err := domainplace.ValidateDeviceID(deviceID); err != nil {
+		return nil, err
+	}
+	in.Source = nil
+	if err := in.Validate(true); err != nil {
+		return nil, err
+	}
+	now := s.clock.Now()
+	n, err := s.repo.CountByDeviceSince(ctx, deviceID, now.Add(-24*time.Hour))
+	if err != nil {
+		return nil, err
+	}
+	if n >= MaxCommunityPerDevicePerDay {
+		return nil, apperr.RateLimited("too many places added from this device; try again later")
+	}
+	p := &domainplace.Place{ID: uuid.New(), Status: domainplace.StatusUnknown, CreatedByDevice: &deviceID, CreatedAt: now, UpdatedAt: now}
+	in.Apply(p)
+	if err := s.repo.Create(ctx, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// own loads a place the device added; anything else is "not found" for it.
+func (s *Service) own(ctx context.Context, deviceID string, id uuid.UUID) (*domainplace.Place, error) {
+	if err := domainplace.ValidateDeviceID(deviceID); err != nil {
+		return nil, err
+	}
+	p, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil || !p.OwnedBy(deviceID) {
+		return nil, apperr.NotFound("important place not found")
+	}
+	return p, nil
+}
+
+func (s *Service) UpdateOwn(ctx context.Context, deviceID string, id uuid.UUID, in domainplace.Fields) (*domainplace.Place, error) {
+	in.Source = nil
+	if err := in.Validate(false); err != nil {
+		return nil, err
+	}
+	p, err := s.own(ctx, deviceID, id)
+	if err != nil {
+		return nil, err
+	}
+	in.Apply(p)
+	p.UpdatedAt = s.clock.Now()
+	if err := s.repo.Update(ctx, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (s *Service) DeleteOwn(ctx context.Context, deviceID string, id uuid.UUID) error {
+	if _, err := s.own(ctx, deviceID, id); err != nil {
+		return err
+	}
+	if _, err := s.repo.Delete(ctx, id); err != nil {
+		return err
+	}
 	return nil
 }
