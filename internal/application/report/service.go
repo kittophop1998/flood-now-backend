@@ -297,8 +297,9 @@ func (s *Service) FindDuplicates(ctx context.Context, lat, lng float64, t domain
 
 // Confirm applies a still_active/cleared confirmation from a device. The
 // business rules live here and in the domain policy, not in the repository:
-// still_active restarts the report's freshness window; either vote may
-// resolve or re-open the report per FreshnessPolicy.NextResolvedAt.
+// still_active restarts the report's freshness window and may carry a
+// ConditionUpdate that replaces the report's current condition; either vote
+// may resolve or re-open the report per FreshnessPolicy.NextResolvedAt.
 func (s *Service) Confirm(ctx context.Context, reportID uuid.UUID, in domainreport.NewConfirmationInput) (*domainreport.ReportWithStats, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
@@ -322,6 +323,11 @@ func (s *Service) Confirm(ctx context.Context, reportID uuid.UUID, in domainrepo
 	if in.Status == domainreport.StatusStillActive {
 		staleAt, expiresAt := s.policy.Window(existing.Type, now)
 		params.Refresh = &ports.Freshness{StaleAt: staleAt, ExpiresAt: expiresAt}
+	}
+	// Fields that don't apply to the category are dropped, not rejected
+	// (same as create).
+	if update := in.Update.For(existing.Type); !update.Empty() {
+		params.Update = &update
 	}
 
 	r, err := s.repo.Confirm(ctx, params)

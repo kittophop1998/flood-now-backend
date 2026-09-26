@@ -70,14 +70,17 @@ type NearbyFilter struct {
 // ConfirmParams is the atomic write the repository performs for a
 // confirmation: upsert the (report_id, device_id) row, extend the parent
 // report's freshness when Refresh is set (decided by the application layer),
-// then re-apply Policy's resolution rule to the new vote counts and record
-// the resulting events.
+// apply Update's non-nil fields to the report (already normalized for its
+// category; recorded as an "updated" event instead of "confirmed"), then
+// re-apply Policy's resolution rule to the new vote counts and record the
+// resulting events.
 type ConfirmParams struct {
 	ReportID uuid.UUID
 	DeviceID string
 	Status   report.ConfirmationStatus
 	Now      time.Time
 	Refresh  *Freshness
+	Update   *report.ConditionUpdate
 	Policy   report.FreshnessPolicy
 }
 

@@ -254,6 +254,7 @@ type NotificationKind string
 const (
 	NotifySevereNearby NotificationKind = "severe_nearby" // new severe report inside a followed area
 	NotifyConfirmed    NotificationKind = "confirmed"     // followed report confirmed still active
+	NotifyUpdated      NotificationKind = "updated"       // followed report's condition (depth, severity, passability, photo) changed
 	NotifyResolved     NotificationKind = "resolved"      // followed report resolved
 	NotifyReopened     NotificationKind = "reopened"      // followed report reported active again
 )
@@ -284,6 +285,8 @@ func NotificationKindFor(followKind Kind, event report.EventKind, severity repor
 		switch event {
 		case report.EventConfirmed:
 			return NotifyConfirmed, true
+		case report.EventUpdated:
+			return NotifyUpdated, true
 		case report.EventResolved:
 			return NotifyResolved, true
 		case report.EventReopened:

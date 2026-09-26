@@ -29,6 +29,7 @@ type fakeRepo struct {
 	listResult []domainreport.ReportWithStats
 
 	lastAggregate ports.AggregateFilter
+	lastConfirm   ports.ConfirmParams
 }
 
 func newFakeRepo() *fakeRepo {
@@ -90,6 +91,21 @@ func (f *fakeRepo) Confirm(ctx context.Context, p ports.ConfirmParams) (*domainr
 		f.votes[p.ReportID] = map[string]domainreport.ConfirmationStatus{}
 	}
 	f.votes[p.ReportID][p.DeviceID] = p.Status
+	f.lastConfirm = p
+	if u := p.Update; u != nil {
+		if u.Severity != nil {
+			r.Severity = *u.Severity
+		}
+		if u.WaterDepth != nil {
+			r.WaterDepth = u.WaterDepth
+		}
+		if u.Passability != nil {
+			r.Passability = u.Passability
+		}
+		if u.ImageKey != nil {
+			r.ImageKey = u.ImageKey
+		}
+	}
 	if p.Refresh != nil {
 		r.LastVerifiedAt = p.Now
 		r.StaleAt = p.Refresh.StaleAt
@@ -446,4 +462,73 @@ func TestAggregateValidatesAndSizesCellsByZoom(t *testing.T) {
 	if appreport.CellDegreesForZoom(12) >= appreport.CellDegreesForZoom(10) {
 		t.Error("cells must shrink as the map zooms in")
 	}
+}
+
+func TestServiceConfirmWithConditionUpdate(t *testing.T) {
+	svc, repo, clock := newTestService(t0)
+	created, _ := svc.Create(context.Background(), validInput())
+	clock.now = t0.Add(time.Hour)
+
+	sev := domainreport.SeverityModerate
+	depth := domainreport.WaterDepthShin
+	key := "reports/2026/09/26/new.jpg"
+	pass := &domainreport.Passability{Walk: domainreport.PassCaution, Motorcycle: domainreport.PassCaution, Sedan: domainreport.PassPassable, SUVPickup: domainreport.PassPassable}
+	updated, err := svc.Confirm(context.Background(), created.ID, domainreport.NewConfirmationInput{
+		DeviceID: deviceA,
+		Status:   domainreport.StatusStillActive,
+		Update:   domainreport.ConditionUpdate{Severity: &sev, WaterDepth: &depth, Passability: pass, ImageKey: &key},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if updated.Severity != sev || *updated.WaterDepth != depth || *updated.ImageKey != key || updated.Passability.Sedan != domainreport.PassPassable {
+		t.Errorf("condition not applied: %+v", updated.Report)
+	}
+	if repo.lastConfirm.Refresh == nil || updated.StillActiveCount != 1 {
+		t.Error("an update is also a still_active confirmation that restarts freshness")
+	}
+
+	// A plain vote carries no update.
+	svc.Confirm(context.Background(), created.ID, domainreport.NewConfirmationInput{DeviceID: deviceB, Status: domainreport.StatusStillActive}) //nolint:errcheck
+	if repo.lastConfirm.Update != nil {
+		t.Error("plain confirmation must not send an update")
+	}
+}
+
+func TestServiceConfirmUpdateDropsFieldsOutsideCategory(t *testing.T) {
+	svc, repo, _ := newTestService(t0)
+	in := validInput()
+	in.Type = domainreport.TypePowerOutage
+	created, _ := svc.Create(context.Background(), in)
+
+	depth := domainreport.WaterDepthKnee
+	pass := &domainreport.Passability{Walk: domainreport.PassImpassable, Motorcycle: domainreport.PassUnknown, Sedan: domainreport.PassUnknown, SUVPickup: domainreport.PassUnknown}
+	if _, err := svc.Confirm(context.Background(), created.ID, domainreport.NewConfirmationInput{
+		DeviceID: deviceA,
+		Status:   domainreport.StatusStillActive,
+		Update:   domainreport.ConditionUpdate{WaterDepth: &depth, Passability: pass},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.lastConfirm.Update != nil {
+		t.Errorf("depth/passability must be dropped for power_outage, got %+v", repo.lastConfirm.Update)
+	}
+}
+
+func TestServiceConfirmUpdateValidation(t *testing.T) {
+	svc, _, _ := newTestService(t0)
+	created, _ := svc.Create(context.Background(), validInput())
+
+	sev := domainreport.SeverityHigh
+	_, err := svc.Confirm(context.Background(), created.ID, domainreport.NewConfirmationInput{
+		DeviceID: deviceA, Status: domainreport.StatusCleared, Update: domainreport.ConditionUpdate{Severity: &sev},
+	})
+	assertCode(t, err, apperr.CodeValidation)
+
+	bad := domainreport.Severity("extreme")
+	badKey := "https://evil.example/x.jpg"
+	_, err = svc.Confirm(context.Background(), created.ID, domainreport.NewConfirmationInput{
+		DeviceID: deviceA, Status: domainreport.StatusStillActive, Update: domainreport.ConditionUpdate{Severity: &bad, ImageKey: &badKey},
+	})
+	assertCode(t, err, apperr.CodeValidation)
 }

@@ -49,6 +49,8 @@ func TestNotificationKindFor(t *testing.T) {
 		{KindArea, report.EventCreated, report.SeverityModerate, "", false},
 		{KindArea, report.EventResolved, report.SeverityCritical, "", false},
 		{KindReport, report.EventConfirmed, report.SeverityLow, NotifyConfirmed, true},
+		{KindReport, report.EventUpdated, report.SeverityLow, NotifyUpdated, true},
+		{KindArea, report.EventUpdated, report.SeverityCritical, "", false},
 		{KindReport, report.EventResolved, report.SeverityLow, NotifyResolved, true},
 		{KindReport, report.EventReopened, report.SeverityLow, NotifyReopened, true},
 		{KindReport, report.EventCreated, report.SeverityCritical, "", false},

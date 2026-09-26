@@ -99,15 +99,20 @@ func (req createReportRequest) toDomain() domainreport.NewReportInput {
 		d := domainreport.WaterDepth(*req.WaterDepth)
 		in.WaterDepth = &d
 	}
-	if p := req.Passability; p != nil {
-		in.Passability = &domainreport.Passability{
-			Walk:       passOrUnknown(p.Walk),
-			Motorcycle: passOrUnknown(p.Motorcycle),
-			Sedan:      passOrUnknown(p.Sedan),
-			SUVPickup:  passOrUnknown(p.SUVPickup),
-		}
-	}
+	in.Passability = req.Passability.toDomain()
 	return in
+}
+
+func (p *passabilityDTO) toDomain() *domainreport.Passability {
+	if p == nil {
+		return nil
+	}
+	return &domainreport.Passability{
+		Walk:       passOrUnknown(p.Walk),
+		Motorcycle: passOrUnknown(p.Motorcycle),
+		Sedan:      passOrUnknown(p.Sedan),
+		SUVPickup:  passOrUnknown(p.SUVPickup),
+	}
 }
 
 // passOrUnknown lets clients omit vehicle classes they didn't assess.
@@ -121,13 +126,29 @@ func passOrUnknown(v string) domainreport.PassLevel {
 type confirmReportRequest struct {
 	DeviceID string `json:"device_id"`
 	Status   string `json:"status"`
+	// Optional condition update (still_active only).
+	Severity    *string         `json:"severity"`
+	WaterDepth  *string         `json:"water_depth"`
+	Passability *passabilityDTO `json:"passability"`
+	ImageKey    *string         `json:"image_key"`
 }
 
 func (req confirmReportRequest) toDomain() domainreport.NewConfirmationInput {
-	return domainreport.NewConfirmationInput{
+	in := domainreport.NewConfirmationInput{
 		DeviceID: req.DeviceID,
 		Status:   domainreport.ConfirmationStatus(req.Status),
 	}
+	in.Update.ImageKey = req.ImageKey
+	if req.Severity != nil {
+		s := domainreport.Severity(*req.Severity)
+		in.Update.Severity = &s
+	}
+	if req.WaterDepth != nil {
+		d := domainreport.WaterDepth(*req.WaterDepth)
+		in.Update.WaterDepth = &d
+	}
+	in.Update.Passability = req.Passability.toDomain()
+	return in
 }
 
 type followResponse struct {

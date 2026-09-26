@@ -104,6 +104,7 @@ type EventKind string
 const (
 	EventCreated   EventKind = "created"
 	EventConfirmed EventKind = "confirmed" // a still_active confirmation
+	EventUpdated   EventKind = "updated"   // a still_active confirmation that also changed the condition
 	EventResolved  EventKind = "resolved"
 	EventReopened  EventKind = "reopened"
 	EventHidden    EventKind = "hidden"   // moderation hid the report

@@ -282,7 +282,7 @@ func (in NewReportInput) Validate() error {
 		}
 	}
 	if !in.Severity.Valid() {
-		fields["severity"] = "must be one of " + strings.Join(validSeverities, ", ")
+		fields["severity"] = "must be one of " + joinValues(validSeverities)
 	}
 	if in.Latitude < -90 || in.Latitude > 90 {
 		fields["latitude"] = "must be between -90 and 90"
@@ -299,21 +299,12 @@ func (in NewReportInput) Validate() error {
 	if in.WaterLevelCM != nil && *in.WaterLevelCM < 0 {
 		fields["water_level_cm"] = "must be >= 0"
 	}
-	if p := in.Passability; p != nil {
-		for name, v := range map[string]PassLevel{"walk": p.Walk, "motorcycle": p.Motorcycle, "sedan": p.Sedan, "suv_pickup": p.SUVPickup} {
-			if !v.Valid() {
-				fields["passability."+name] = "must be one of passable, caution, not_recommended, impassable, unknown"
-			}
-		}
-	}
+	validatePassability(in.Passability, fields)
 	if in.PeopleCount != nil && *in.PeopleCount < 0 {
 		fields["people_count"] = "must be >= 0"
 	}
-	if in.ImageKey != nil {
-		key := strings.TrimSpace(*in.ImageKey)
-		if key == "" || strings.Contains(key, "..") || strings.Contains(key, "://") {
-			fields["image_key"] = "must be a plain object key returned by /uploads/presign"
-		}
+	if in.ImageKey != nil && !validImageKey(*in.ImageKey) {
+		fields["image_key"] = "must be a plain object key returned by /uploads/presign"
 	}
 	if in.ContactPhone != nil && len(strings.TrimSpace(*in.ContactPhone)) > 32 {
 		fields["contact_phone"] = "must be 32 characters or fewer"
@@ -329,6 +320,27 @@ func (in NewReportInput) Validate() error {
 		return apperr.Validation("report is invalid", fields)
 	}
 	return nil
+}
+
+func joinValues(values []string) string { return strings.Join(values, ", ") }
+
+// validatePassability adds a field error for each invalid vehicle level.
+func validatePassability(p *Passability, fields map[string]string) {
+	if p == nil {
+		return
+	}
+	for name, v := range map[string]PassLevel{"walk": p.Walk, "motorcycle": p.Motorcycle, "sedan": p.Sedan, "suv_pickup": p.SUVPickup} {
+		if !v.Valid() {
+			fields["passability."+name] = "must be one of passable, caution, not_recommended, impassable, unknown"
+		}
+	}
+}
+
+// validImageKey accepts only a plain object key such as /uploads/presign
+// returns — never a URL or a path escaping the bucket prefix.
+func validImageKey(key string) bool {
+	key = strings.TrimSpace(key)
+	return key != "" && !strings.Contains(key, "..") && !strings.Contains(key, "://")
 }
 
 // Normalized drops fields that don't apply to the report's category (water

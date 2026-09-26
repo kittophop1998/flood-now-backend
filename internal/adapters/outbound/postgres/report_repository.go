@@ -461,7 +461,14 @@ func (repo *ReportRepository) Confirm(ctx context.Context, params ports.ConfirmP
 		); err != nil {
 			return nil, fmt.Errorf("update report freshness: %w", err)
 		}
-		if err := insertEvent(ctx, tx, params.ReportID, report.EventConfirmed, &params.DeviceID, params.Now); err != nil {
+		event := report.EventConfirmed
+		if params.Update != nil {
+			if err := applyConditionUpdate(ctx, tx, params.ReportID, *params.Update); err != nil {
+				return nil, err
+			}
+			event = report.EventUpdated
+		}
+		if err := insertEvent(ctx, tx, params.ReportID, event, &params.DeviceID, params.Now); err != nil {
 			return nil, err
 		}
 	}
@@ -495,4 +502,34 @@ func (repo *ReportRepository) Confirm(ctx context.Context, params ports.ConfirmP
 		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 	return r, nil
+}
+
+// applyConditionUpdate overwrites the report's condition with the update's
+// non-nil fields (COALESCE keeps the rest). A new water_depth also clears the
+// legacy exact water_level_cm, which would otherwise contradict it.
+func applyConditionUpdate(ctx context.Context, tx *sql.Tx, reportID uuid.UUID, u report.ConditionUpdate) error {
+	var severity, waterDepth any
+	if u.Severity != nil {
+		severity = string(*u.Severity)
+	}
+	if u.WaterDepth != nil {
+		waterDepth = string(*u.WaterDepth)
+	}
+	pass := passColumns(u.Passability)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE reports SET
+			severity = COALESCE($1, severity),
+			water_depth = COALESCE($2, water_depth),
+			water_level_cm = CASE WHEN $2::text IS NULL THEN water_level_cm END,
+			pass_walk = COALESCE($3, pass_walk),
+			pass_motorcycle = COALESCE($4, pass_motorcycle),
+			pass_sedan = COALESCE($5, pass_sedan),
+			pass_suv_pickup = COALESCE($6, pass_suv_pickup),
+			image_key = COALESCE($7, image_key)
+		WHERE id = $8`,
+		severity, waterDepth, pass[0], pass[1], pass[2], pass[3], u.ImageKey, reportID,
+	); err != nil {
+		return fmt.Errorf("update report condition: %w", err)
+	}
+	return nil
 }
