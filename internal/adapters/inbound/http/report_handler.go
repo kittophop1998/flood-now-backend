@@ -82,6 +82,8 @@ func (p *ReportPresenter) one(r domainreport.ReportWithStats) reportResponse {
 		IsExpired:        r.IsExpired(now),
 		StillActiveCount: r.StillActiveCount,
 		ClearedCount:     r.ClearedCount,
+		LikeCount:        r.LikeCount,
+		SupportCount:     r.SupportCount,
 		DistanceM:        r.DistanceM,
 	}
 }
@@ -390,6 +392,44 @@ func (h *ReportHandler) Confirm(c *gin.Context) {
 	}
 
 	r, err := h.service.Confirm(c.Request.Context(), id, req.toDomain())
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, h.presenter.one(*r))
+}
+
+// React sets (creates or switches) the caller device's like/support reaction.
+func (h *ReportHandler) React(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		writeError(c, apperr.Validation("invalid report id", map[string]string{"id": "must be a UUID"}))
+		return
+	}
+
+	var req reactionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, apperr.Validation("request body is invalid JSON", nil))
+		return
+	}
+
+	r, err := h.service.React(c.Request.Context(), id, req.toDomain())
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, h.presenter.one(*r))
+}
+
+// RemoveReaction clears the caller device's reaction, if any.
+func (h *ReportHandler) RemoveReaction(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		writeError(c, apperr.Validation("invalid report id", map[string]string{"id": "must be a UUID"}))
+		return
+	}
+
+	r, err := h.service.RemoveReaction(c.Request.Context(), id, c.Query("device_id"))
 	if err != nil {
 		writeError(c, err)
 		return

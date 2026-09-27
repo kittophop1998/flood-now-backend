@@ -265,6 +265,11 @@ type ReportWithStats struct {
 	Report
 	StillActiveCount int
 	ClearedCount     int
+	// LikeCount/SupportCount are social reaction totals (see reaction.go).
+	// Purely cosmetic: never read by severity, freshness, trust, route
+	// safety or moderation logic.
+	LikeCount    int
+	SupportCount int
 	// DistanceM is set only by location-based queries (nearby, duplicates).
 	DistanceM *float64
 }

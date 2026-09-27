@@ -53,6 +53,8 @@ type reportResponse struct {
 	IsExpired        bool              `json:"is_expired"`
 	StillActiveCount int               `json:"still_active_count"`
 	ClearedCount     int               `json:"cleared_count"`
+	LikeCount        int               `json:"like_count"`
+	SupportCount     int               `json:"support_count"`
 	DistanceM        *float64          `json:"distance_m,omitempty"`
 }
 
@@ -157,6 +159,15 @@ func (req confirmReportRequest) toDomain() domainreport.NewConfirmationInput {
 	}
 	in.Update.Passability = req.Passability.toDomain()
 	return in
+}
+
+type reactionRequest struct {
+	DeviceID string `json:"device_id"`
+	Type     string `json:"type"`
+}
+
+func (req reactionRequest) toDomain() domainreport.NewReactionInput {
+	return domainreport.NewReactionInput{DeviceID: req.DeviceID, Type: domainreport.ReactionType(req.Type)}
 }
 
 type followResponse struct {

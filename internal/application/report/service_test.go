@@ -24,6 +24,7 @@ func (c *fakeClock) Now() time.Time { return c.now }
 type fakeRepo struct {
 	reports    map[uuid.UUID]*domainreport.ReportWithStats
 	votes      map[uuid.UUID]map[string]domainreport.ConfirmationStatus
+	reactions  map[uuid.UUID]map[string]domainreport.ReactionType
 	lastList   ports.ReportFilter
 	lastNearby ports.NearbyFilter
 	listResult []domainreport.ReportWithStats
@@ -34,8 +35,9 @@ type fakeRepo struct {
 
 func newFakeRepo() *fakeRepo {
 	return &fakeRepo{
-		reports: map[uuid.UUID]*domainreport.ReportWithStats{},
-		votes:   map[uuid.UUID]map[string]domainreport.ConfirmationStatus{},
+		reports:   map[uuid.UUID]*domainreport.ReportWithStats{},
+		votes:     map[uuid.UUID]map[string]domainreport.ConfirmationStatus{},
+		reactions: map[uuid.UUID]map[string]domainreport.ReactionType{},
 	}
 }
 
@@ -80,6 +82,41 @@ func (f *fakeRepo) Aggregate(ctx context.Context, filter ports.AggregateFilter) 
 
 func (f *fakeRepo) Events(ctx context.Context, id uuid.UUID) ([]ports.ReportEvent, error) {
 	return nil, nil
+}
+
+func (f *fakeRepo) recount(reportID uuid.UUID) {
+	r := f.reports[reportID]
+	r.LikeCount, r.SupportCount = 0, 0
+	for _, ty := range f.reactions[reportID] {
+		if ty == domainreport.ReactionLike {
+			r.LikeCount++
+		} else {
+			r.SupportCount++
+		}
+	}
+}
+
+func (f *fakeRepo) React(ctx context.Context, reportID uuid.UUID, deviceID string, t domainreport.ReactionType) (*domainreport.ReportWithStats, error) {
+	if _, ok := f.reports[reportID]; !ok {
+		return nil, nil
+	}
+	if f.reactions[reportID] == nil {
+		f.reactions[reportID] = map[string]domainreport.ReactionType{}
+	}
+	f.reactions[reportID][deviceID] = t
+	f.recount(reportID)
+	cp := *f.reports[reportID]
+	return &cp, nil
+}
+
+func (f *fakeRepo) RemoveReaction(ctx context.Context, reportID uuid.UUID, deviceID string) (*domainreport.ReportWithStats, error) {
+	if _, ok := f.reports[reportID]; !ok {
+		return nil, nil
+	}
+	delete(f.reactions[reportID], deviceID)
+	f.recount(reportID)
+	cp := *f.reports[reportID]
+	return &cp, nil
 }
 
 func (f *fakeRepo) Confirm(ctx context.Context, p ports.ConfirmParams) (*domainreport.ReportWithStats, error) {
@@ -441,6 +478,83 @@ func TestHiddenReportsAreNotFoundAndCannotBeConfirmed(t *testing.T) {
 	_, err := svc.Get(context.Background(), r.ID)
 	assertCode(t, err, apperr.CodeNotFound)
 	_, err = svc.Confirm(context.Background(), r.ID, domainreport.NewConfirmationInput{DeviceID: deviceA, Status: domainreport.StatusCleared})
+	assertCode(t, err, apperr.CodeNotFound)
+	_, err = svc.React(context.Background(), r.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike})
+	assertCode(t, err, apperr.CodeNotFound)
+	_, err = svc.RemoveReaction(context.Background(), r.ID, deviceA)
+	assertCode(t, err, apperr.CodeNotFound)
+}
+
+func TestServiceReactCreatesAndSwitches(t *testing.T) {
+	svc, _, _ := newTestService(t0)
+	created, _ := svc.Create(context.Background(), validInput())
+
+	liked, err := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if liked.LikeCount != 1 || liked.SupportCount != 0 {
+		t.Fatalf("expected 1 like/0 support, got %d/%d", liked.LikeCount, liked.SupportCount)
+	}
+
+	// Same device reacting again with the same type stays at one reaction.
+	again, _ := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike})
+	if again.LikeCount != 1 {
+		t.Errorf("repeat like from one device must not count twice, got %d", again.LikeCount)
+	}
+
+	// Switching to support decrements like and increments support.
+	switched, _ := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionSupport})
+	if switched.LikeCount != 0 || switched.SupportCount != 1 {
+		t.Errorf("expected switch to 0 like/1 support, got %d/%d", switched.LikeCount, switched.SupportCount)
+	}
+
+	// A second device's own reaction is independent.
+	both, _ := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceB, Type: domainreport.ReactionLike})
+	if both.LikeCount != 1 || both.SupportCount != 1 {
+		t.Errorf("expected 1 like/1 support across two devices, got %d/%d", both.LikeCount, both.SupportCount)
+	}
+}
+
+func TestServiceRemoveReactionTogglesOff(t *testing.T) {
+	svc, _, _ := newTestService(t0)
+	created, _ := svc.Create(context.Background(), validInput())
+	svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike}) //nolint:errcheck
+
+	cleared, err := svc.RemoveReaction(context.Background(), created.ID, deviceA)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cleared.LikeCount != 0 {
+		t.Errorf("expected 0 likes after removal, got %d", cleared.LikeCount)
+	}
+
+	// Removing again (no reaction left) is a harmless no-op.
+	again, err := svc.RemoveReaction(context.Background(), created.ID, deviceA)
+	if err != nil || again.LikeCount != 0 {
+		t.Errorf("expected idempotent removal, got count=%d err=%v", again.LikeCount, err)
+	}
+}
+
+func TestServiceReactValidatesInput(t *testing.T) {
+	svc, _, _ := newTestService(t0)
+	created, _ := svc.Create(context.Background(), validInput())
+
+	_, err := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: "love"})
+	assertCode(t, err, apperr.CodeValidation)
+
+	_, err = svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: "short", Type: domainreport.ReactionLike})
+	assertCode(t, err, apperr.CodeValidation)
+
+	_, err = svc.RemoveReaction(context.Background(), created.ID, "short")
+	assertCode(t, err, apperr.CodeValidation)
+}
+
+func TestServiceReactUnknownReportNotFound(t *testing.T) {
+	svc, _, _ := newTestService(t0)
+	_, err := svc.React(context.Background(), uuid.New(), domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike})
+	assertCode(t, err, apperr.CodeNotFound)
+	_, err = svc.RemoveReaction(context.Background(), uuid.New(), deviceA)
 	assertCode(t, err, apperr.CodeNotFound)
 }
 

@@ -132,6 +132,13 @@ type ReportRepository interface {
 	Aggregate(ctx context.Context, filter AggregateFilter) ([]AggregateCell, error)
 	Confirm(ctx context.Context, params ConfirmParams) (*report.ReportWithStats, error)
 	Events(ctx context.Context, reportID uuid.UUID) ([]ReportEvent, error)
+	// React sets (creates or switches) a device's like/support reaction on a
+	// report and returns the updated report; nil if the report doesn't exist.
+	React(ctx context.Context, reportID uuid.UUID, deviceID string, reactionType report.ReactionType) (*report.ReportWithStats, error)
+	// RemoveReaction clears a device's reaction, if any, and returns the
+	// updated report; nil if the report doesn't exist. Idempotent when the
+	// device had no reaction.
+	RemoveReaction(ctx context.Context, reportID uuid.UUID, deviceID string) (*report.ReportWithStats, error)
 }
 
 // NotificationQuery selects report events relevant to a device's follows.

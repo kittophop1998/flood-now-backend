@@ -348,6 +348,52 @@ func (s *Service) Confirm(ctx context.Context, reportID uuid.UUID, in domainrepo
 	return r, nil
 }
 
+// React sets (or switches) a device's like/support reaction on a report.
+// Reactions are social feedback only — this never touches severity,
+// freshness, confirmation counts, route safety or moderation state.
+func (s *Service) React(ctx context.Context, reportID uuid.UUID, in domainreport.NewReactionInput) (*domainreport.ReportWithStats, error) {
+	if err := in.Validate(); err != nil {
+		return nil, err
+	}
+	existing, err := s.repo.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil || existing.HiddenAt != nil {
+		return nil, apperr.NotFound("report not found")
+	}
+	r, err := s.repo.React(ctx, reportID, in.DeviceID, in.Type)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, apperr.NotFound("report not found")
+	}
+	return r, nil
+}
+
+// RemoveReaction clears a device's reaction to a report, if any.
+func (s *Service) RemoveReaction(ctx context.Context, reportID uuid.UUID, deviceID string) (*domainreport.ReportWithStats, error) {
+	if !domainreport.ValidDeviceID(deviceID) {
+		return nil, apperr.Validation("reaction is invalid", map[string]string{"device_id": "must be between 8 and 128 characters"})
+	}
+	existing, err := s.repo.GetByID(ctx, reportID)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil || existing.HiddenAt != nil {
+		return nil, apperr.NotFound("report not found")
+	}
+	r, err := s.repo.RemoveReaction(ctx, reportID, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, apperr.NotFound("report not found")
+	}
+	return r, nil
+}
+
 func clampLimit(v, def, max int) int {
 	if v <= 0 {
 		return def

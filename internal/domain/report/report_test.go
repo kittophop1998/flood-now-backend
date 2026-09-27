@@ -254,6 +254,36 @@ func TestConfirmationInputValidate(t *testing.T) {
 	})
 }
 
+func TestReactionInputValidate(t *testing.T) {
+	t.Run("valid like passes", func(t *testing.T) {
+		in := NewReactionInput{DeviceID: "12345678-aaaa-bbbb-cccc-dddddddddddd", Type: ReactionLike}
+		if err := in.Validate(); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	})
+
+	t.Run("valid support passes", func(t *testing.T) {
+		in := NewReactionInput{DeviceID: "12345678-aaaa-bbbb-cccc-dddddddddddd", Type: ReactionSupport}
+		if err := in.Validate(); err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	})
+
+	t.Run("invalid type rejected", func(t *testing.T) {
+		in := NewReactionInput{DeviceID: "12345678-aaaa-bbbb-cccc-dddddddddddd", Type: "love"}
+		if err := in.Validate(); err == nil {
+			t.Fatal("expected error for invalid reaction type")
+		}
+	})
+
+	t.Run("too-short device id rejected", func(t *testing.T) {
+		in := NewReactionInput{DeviceID: "short", Type: ReactionLike}
+		if err := in.Validate(); err == nil {
+			t.Fatal("expected error for short device id")
+		}
+	})
+}
+
 func TestYearRoundCategories(t *testing.T) {
 	for _, ty := range []Type{TypeRoadDamage, TypeConstruction, TypeTrafficSignal} {
 		if !ty.Valid() || !ty.Creatable() {

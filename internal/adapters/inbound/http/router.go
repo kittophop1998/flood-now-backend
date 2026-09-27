@@ -56,6 +56,8 @@ func NewRouter(deps Deps) *gin.Engine {
 		v1.GET("/reports/:id", deps.ReportHandler.Get)
 		v1.POST("/reports", deps.ReportHandler.Create)
 		v1.POST("/reports/:id/confirmations", deps.ReportHandler.Confirm)
+		v1.POST("/reports/:id/reactions", deps.ReportHandler.React)
+		v1.DELETE("/reports/:id/reactions", deps.ReportHandler.RemoveReaction)
 		v1.POST("/reports/:id/problems", deps.ModerationHandler.ReportProblem)
 		v1.POST("/uploads/presign", deps.UploadHandler.Presign)
 

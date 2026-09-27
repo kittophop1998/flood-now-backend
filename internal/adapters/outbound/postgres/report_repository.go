@@ -36,7 +36,9 @@ const reportColumns = `
 	r.created_at, r.updated_at, r.last_verified_at, r.stale_at, r.expires_at, r.resolved_at,
 	r.client_id, r.hidden_at, r.hidden_reason,
 	(SELECT COUNT(*) FROM report_confirmations c WHERE c.report_id = r.id AND c.status = 'still_active') AS still_active_count,
-	(SELECT COUNT(*) FROM report_confirmations c WHERE c.report_id = r.id AND c.status = 'cleared') AS cleared_count
+	(SELECT COUNT(*) FROM report_confirmations c WHERE c.report_id = r.id AND c.status = 'cleared') AS cleared_count,
+	(SELECT COUNT(*) FROM report_reactions rr WHERE rr.report_id = r.id AND rr.type = 'like') AS like_count,
+	(SELECT COUNT(*) FROM report_reactions rr WHERE rr.report_id = r.id AND rr.type = 'support') AS support_count
 `
 
 type rowScanner interface{ Scan(...any) error }
@@ -55,6 +57,7 @@ func scanReport(row rowScanner, extra ...any) (*report.ReportWithStats, error) {
 		&r.CreatedAt, &r.UpdatedAt, &r.LastVerifiedAt, &r.StaleAt, &r.ExpiresAt, &r.ResolvedAt,
 		&r.ClientID, &r.HiddenAt, &r.HiddenReason,
 		&r.StillActiveCount, &r.ClearedCount,
+		&r.LikeCount, &r.SupportCount,
 	}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
@@ -568,4 +571,50 @@ func applyConditionUpdate(ctx context.Context, tx *sql.Tx, reportID uuid.UUID, u
 		return fmt.Errorf("update report condition: %w", err)
 	}
 	return nil
+}
+
+// React upserts the device's reaction (a repeat is a no-op; a different type
+// switches it) and reloads the report with fresh like/support counts. Unlike
+// Confirm this needs no row lock: it never reads-then-writes the report row,
+// and the counts are always computed fresh from report_reactions on read.
+func (repo *ReportRepository) React(ctx context.Context, reportID uuid.UUID, deviceID string, reactionType report.ReactionType) (*report.ReportWithStats, error) {
+	if _, err := repo.db.ExecContext(ctx, `
+		INSERT INTO report_reactions (id, report_id, device_id, type, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,now(),now())
+		ON CONFLICT (report_id, device_id)
+		DO UPDATE SET type = EXCLUDED.type, updated_at = EXCLUDED.updated_at`,
+		uuid.New(), reportID, deviceID, reactionType,
+	); err != nil {
+		if isForeignKeyViolation(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("upsert reaction: %w", err)
+	}
+	r, err := getByID(ctx, repo.db, reportID)
+	if err != nil {
+		return nil, fmt.Errorf("reload reacted report: %w", err)
+	}
+	return r, nil
+}
+
+// RemoveReaction clears the device's reaction, if any, and reloads the
+// report. Removing a reaction that doesn't exist is a no-op.
+func (repo *ReportRepository) RemoveReaction(ctx context.Context, reportID uuid.UUID, deviceID string) (*report.ReportWithStats, error) {
+	if _, err := repo.db.ExecContext(ctx,
+		`DELETE FROM report_reactions WHERE report_id = $1 AND device_id = $2`, reportID, deviceID,
+	); err != nil {
+		return nil, fmt.Errorf("delete reaction: %w", err)
+	}
+	r, err := getByID(ctx, repo.db, reportID)
+	if err != nil {
+		return nil, fmt.Errorf("reload report: %w", err)
+	}
+	return r, nil
+}
+
+// isForeignKeyViolation reports a Postgres FK-constraint error (the report
+// was deleted between the caller's existence check and this write).
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
