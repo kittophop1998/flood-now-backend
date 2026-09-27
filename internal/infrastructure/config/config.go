@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/robfig/cron/v3"
 )
 
 type Config struct {
@@ -62,6 +63,27 @@ type Config struct {
 	// is off and DOHCCTVWarning says why.
 	DOHCCTV        DOHCCTVConfig
 	DOHCCTVWarning string
+
+	// Scheduled R2 image cleanup (see docs/database.md#image-cleanup). An
+	// invalid setting never fails boot: it falls back to its default and
+	// R2CleanupWarning says why.
+	R2Cleanup        R2CleanupConfig
+	R2CleanupWarning string
+}
+
+type R2CleanupConfig struct {
+	Enabled bool
+	Cron    string
+	// OrphanRetention: an unreferenced upload under a managed prefix is
+	// deleted once it's this old.
+	OrphanRetention time.Duration
+	// ResolvedRetention: a resolved/expired entity's image is deleted once
+	// its lifecycle ended this long ago.
+	ResolvedRetention time.Duration
+	// BatchSize caps candidates fetched per query per run.
+	BatchSize int
+	// DryRun: find and log candidates, delete nothing.
+	DryRun bool
 }
 
 type DOHCCTVConfig struct {
@@ -159,6 +181,7 @@ func Load() (*Config, error) {
 
 	cfg.GISTDA, cfg.GISTDAWarning = loadGISTDA()
 	cfg.DOHCCTV, cfg.DOHCCTVWarning = loadDOHCCTV()
+	cfg.R2Cleanup, cfg.R2CleanupWarning = loadR2Cleanup()
 
 	if cfg.R2Endpoint == "" && cfg.R2AccountID != "" {
 		cfg.R2Endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.R2AccountID)
@@ -233,6 +256,56 @@ func loadDOHCCTV() (DOHCCTVConfig, string) {
 	}
 	d.Enabled = true
 	return d, strings.Join(warnings, "; ")
+}
+
+const (
+	defaultR2CleanupCron            = "0 3 * * *"
+	defaultR2OrphanRetention        = 24 * time.Hour
+	defaultR2ResolvedImageRetention = 7 * 24 * time.Hour
+	defaultR2CleanupBatchSize       = 100
+)
+
+// loadR2Cleanup never fails the boot: any missing or invalid value falls
+// back to its default (the job still runs, just with defaults) except the
+// enabled flag itself, which the caller uses as-is.
+func loadR2Cleanup() (R2CleanupConfig, string) {
+	c := R2CleanupConfig{
+		Enabled:           getEnv("R2_CLEANUP_ENABLED", "true") == "true",
+		Cron:              getEnv("R2_CLEANUP_CRON", defaultR2CleanupCron),
+		OrphanRetention:   defaultR2OrphanRetention,
+		ResolvedRetention: defaultR2ResolvedImageRetention,
+		BatchSize:         defaultR2CleanupBatchSize,
+		DryRun:            getEnv("R2_CLEANUP_DRY_RUN", "false") == "true",
+	}
+	var warnings []string
+
+	if _, err := cron.ParseStandard(c.Cron); err != nil {
+		warnings = append(warnings, fmt.Sprintf("R2_CLEANUP_CRON %q is invalid, using %q: %v", c.Cron, defaultR2CleanupCron, err))
+		c.Cron = defaultR2CleanupCron
+	}
+	if raw := os.Getenv("R2_ORPHAN_RETENTION_HOURS"); raw != "" {
+		if n, err := strconv.Atoi(raw); err != nil || n < 1 {
+			warnings = append(warnings, fmt.Sprintf("R2_ORPHAN_RETENTION_HOURS=%q is invalid, using %s", raw, defaultR2OrphanRetention))
+		} else {
+			c.OrphanRetention = time.Duration(n) * time.Hour
+		}
+	}
+	if raw := os.Getenv("R2_RESOLVED_IMAGE_RETENTION_DAYS"); raw != "" {
+		if n, err := strconv.Atoi(raw); err != nil || n < 1 {
+			warnings = append(warnings, fmt.Sprintf("R2_RESOLVED_IMAGE_RETENTION_DAYS=%q is invalid, using %s", raw, defaultR2ResolvedImageRetention))
+		} else {
+			c.ResolvedRetention = time.Duration(n) * 24 * time.Hour
+		}
+	}
+	if raw := os.Getenv("R2_CLEANUP_BATCH_SIZE"); raw != "" {
+		if n, err := strconv.Atoi(raw); err != nil || n < 1 {
+			warnings = append(warnings, fmt.Sprintf("R2_CLEANUP_BATCH_SIZE=%q is invalid, using %d", raw, defaultR2CleanupBatchSize))
+		} else {
+			c.BatchSize = n
+		}
+	}
+
+	return c, strings.Join(warnings, "; ")
 }
 
 func getEnv(key, fallback string) string {

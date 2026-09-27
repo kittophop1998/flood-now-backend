@@ -50,6 +50,18 @@ func (m *memAnnouncements) Update(_ context.Context, a *announcement.Announcemen
 	m.items[a.ID] = *a
 	return nil
 }
+func (m *memAnnouncements) ExpiredImageCandidates(_ context.Context, _ time.Time, _ int) ([]ports.AnnouncementImageCandidate, error) {
+	return nil, nil
+}
+
+func (m *memAnnouncements) ImageKeyReferenced(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+
+func (m *memAnnouncements) RemoveImageIfPresent(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
+	return false, nil
+}
+
 func (m *memAnnouncements) Delete(_ context.Context, id uuid.UUID) (bool, error) {
 	_, ok := m.items[id]
 	delete(m.items, id)

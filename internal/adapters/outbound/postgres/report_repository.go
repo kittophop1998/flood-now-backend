@@ -618,3 +618,57 @@ func isForeignKeyViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
+
+// ImageCleanupCandidates finds reports whose lifecycle ended at or before
+// cutoff (resolved, or expired and never resolved) and that still carry an
+// image. Only used by the image cleanup job.
+func (repo *ReportRepository) ImageCleanupCandidates(ctx context.Context, cutoff time.Time, limit int) ([]ports.ImageCleanupCandidate, error) {
+	rows, err := repo.db.QueryContext(ctx, `
+		SELECT id, image_key, resolved_at, expires_at
+		FROM reports
+		WHERE image_key IS NOT NULL
+		  AND (
+		    (resolved_at IS NOT NULL AND resolved_at <= $1)
+		    OR (resolved_at IS NULL AND expires_at <= $1)
+		  )
+		ORDER BY COALESCE(resolved_at, expires_at) ASC
+		LIMIT $2`, cutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query image cleanup candidates: %w", err)
+	}
+	defer rows.Close()
+
+	out := []ports.ImageCleanupCandidate{}
+	for rows.Next() {
+		var c ports.ImageCleanupCandidate
+		if err := rows.Scan(&c.ReportID, &c.ImageKey, &c.ResolvedAt, &c.ExpiresAt); err != nil {
+			return nil, fmt.Errorf("scan image cleanup candidate: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ImageKeyReferenced reports whether any report still carries key.
+func (repo *ReportRepository) ImageKeyReferenced(ctx context.Context, key string) (bool, error) {
+	var referenced bool
+	if err := repo.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM reports WHERE image_key = $1)`, key,
+	).Scan(&referenced); err != nil {
+		return false, fmt.Errorf("check report image reference: %w", err)
+	}
+	return referenced, nil
+}
+
+// ClearImageIfUnchanged nulls image_key only if it still equals key, so a
+// report that got a new image between the candidate read and the R2 delete
+// keeps it.
+func (repo *ReportRepository) ClearImageIfUnchanged(ctx context.Context, reportID uuid.UUID, key string) (bool, error) {
+	res, err := repo.db.ExecContext(ctx,
+		`UPDATE reports SET image_key = NULL WHERE id = $1 AND image_key = $2`, reportID, key)
+	if err != nil {
+		return false, fmt.Errorf("clear report image_key: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -147,6 +148,74 @@ func (repo *AnnouncementRepository) Delete(ctx context.Context, id uuid.UUID) (b
 	res, err := repo.db.ExecContext(ctx, `DELETE FROM announcements WHERE id = $1`, id)
 	if err != nil {
 		return false, fmt.Errorf("delete announcement: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ExpiredImageCandidates finds published announcements whose window ended at
+// or before cutoff and that still carry at least one image. Only used by the
+// image cleanup job; the images column is returned so the caller can fan out
+// per key.
+func (repo *AnnouncementRepository) ExpiredImageCandidates(ctx context.Context, cutoff time.Time, limit int) ([]ports.AnnouncementImageCandidate, error) {
+	rows, err := repo.db.QueryContext(ctx, `
+		SELECT id, images, ends_at
+		FROM announcements
+		WHERE published_at IS NOT NULL AND ends_at IS NOT NULL AND ends_at <= $1
+		  AND images <> '[]'::jsonb
+		ORDER BY ends_at ASC
+		LIMIT $2`, cutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query announcement image cleanup candidates: %w", err)
+	}
+	defer rows.Close()
+
+	out := []ports.AnnouncementImageCandidate{}
+	for rows.Next() {
+		var (
+			id     uuid.UUID
+			images []byte
+			endsAt time.Time
+		)
+		if err := rows.Scan(&id, &images, &endsAt); err != nil {
+			return nil, fmt.Errorf("scan announcement image cleanup candidate: %w", err)
+		}
+		var imgs []announcement.Image
+		if err := json.Unmarshal(images, &imgs); err != nil {
+			return nil, fmt.Errorf("decode announcement images: %w", err)
+		}
+		for _, img := range imgs {
+			out = append(out, ports.AnnouncementImageCandidate{AnnouncementID: id, ImageKey: img.Key, EndsAt: endsAt})
+		}
+	}
+	return out, rows.Err()
+}
+
+// ImageKeyReferenced reports whether any announcement's images still include key.
+func (repo *AnnouncementRepository) ImageKeyReferenced(ctx context.Context, key string) (bool, error) {
+	var referenced bool
+	if err := repo.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM announcements WHERE images @> jsonb_build_array(jsonb_build_object('key', $1::text)))`, key,
+	).Scan(&referenced); err != nil {
+		return false, fmt.Errorf("check announcement image reference: %w", err)
+	}
+	return referenced, nil
+}
+
+// RemoveImageIfPresent drops key from an announcement's images, only if it
+// is still present, so an edit that already removed it (or re-added it) is
+// left untouched.
+func (repo *AnnouncementRepository) RemoveImageIfPresent(ctx context.Context, announcementID uuid.UUID, key string) (bool, error) {
+	res, err := repo.db.ExecContext(ctx, `
+		UPDATE announcements
+		SET images = COALESCE(
+			(SELECT jsonb_agg(elem) FROM jsonb_array_elements(images) elem WHERE elem->>'key' <> $2),
+			'[]'::jsonb)
+		WHERE id = $1
+		  AND images @> jsonb_build_array(jsonb_build_object('key', $2::text))`,
+		announcementID, key)
+	if err != nil {
+		return false, fmt.Errorf("remove announcement image: %w", err)
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err

@@ -84,6 +84,18 @@ func (f *fakeRepo) Events(ctx context.Context, id uuid.UUID) ([]ports.ReportEven
 	return nil, nil
 }
 
+func (f *fakeRepo) ImageCleanupCandidates(ctx context.Context, cutoff time.Time, limit int) ([]ports.ImageCleanupCandidate, error) {
+	return nil, nil
+}
+
+func (f *fakeRepo) ImageKeyReferenced(ctx context.Context, key string) (bool, error) {
+	return false, nil
+}
+
+func (f *fakeRepo) ClearImageIfUnchanged(ctx context.Context, reportID uuid.UUID, key string) (bool, error) {
+	return false, nil
+}
+
 func (f *fakeRepo) recount(reportID uuid.UUID) {
 	r := f.reports[reportID]
 	r.LikeCount, r.SupportCount = 0, 0

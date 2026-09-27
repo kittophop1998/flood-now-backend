@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	appannouncement "floodnow-api/internal/application/announcement"
 	appcctv "floodnow-api/internal/application/cctv"
 	appfollow "floodnow-api/internal/application/follow"
+	appimagecleanup "floodnow-api/internal/application/imagecleanup"
 	appimportantplace "floodnow-api/internal/application/importantplace"
 	appmoderation "floodnow-api/internal/application/moderation"
 	appofficialflood "floodnow-api/internal/application/officialflood"
@@ -29,10 +31,13 @@ import (
 	appsos "floodnow-api/internal/application/sos"
 	appupload "floodnow-api/internal/application/upload"
 	"floodnow-api/internal/domain/donation"
+	domainimagecleanup "floodnow-api/internal/domain/imagecleanup"
 	"floodnow-api/internal/domain/moderation"
 	domainreport "floodnow-api/internal/domain/report"
 	"floodnow-api/internal/infrastructure/clock"
 	"floodnow-api/internal/infrastructure/config"
+
+	"github.com/robfig/cron/v3"
 )
 
 func main() {
@@ -94,6 +99,9 @@ func run() error {
 	if cfg.AdminToken == "" {
 		log.Printf("admin API disabled (ADMIN_TOKEN not set)")
 	}
+	if cfg.R2CleanupWarning != "" {
+		log.Printf("R2 image cleanup config: %s", cfg.R2CleanupWarning)
+	}
 
 	realClock := clock.Real{}
 	reportRepo := postgres.NewReportRepository(db)
@@ -107,8 +115,42 @@ func run() error {
 	routeService := approute.NewService(routing.NewOSRM(cfg.RouterURL, cfg.RouterFootURL, cfg.GeocoderUserAgent), reportRepo, realClock)
 	sosService := appsos.NewService(postgres.NewSOSRepository(db), realClock)
 	importantPlaceService := appimportantplace.NewService(postgres.NewImportantPlaceRepository(db), realClock)
-	announcementService := appannouncement.NewService(postgres.NewAnnouncementRepository(db), realClock)
+	announcementRepo := postgres.NewAnnouncementRepository(db)
+	announcementService := appannouncement.NewService(announcementRepo, realClock)
 	moderationService := appmoderation.NewService(postgres.NewModerationRepository(db), reportRepo, realClock, modPolicy)
+
+	// nil when the cleanup job is disabled: no cron entry is registered and
+	// the API is otherwise unaffected.
+	var imageCleanupCron *cron.Cron
+	if cfg.R2Cleanup.Enabled {
+		cleanupPolicy := domainimagecleanup.Policy{
+			Enabled:           true,
+			OrphanRetention:   cfg.R2Cleanup.OrphanRetention,
+			ResolvedRetention: cfg.R2Cleanup.ResolvedRetention,
+			BatchSize:         cfg.R2Cleanup.BatchSize,
+			DryRun:            cfg.R2Cleanup.DryRun,
+		}
+		if err := cleanupPolicy.Validate(); err != nil {
+			log.Printf("R2 image cleanup disabled: invalid policy: %v", err)
+		} else {
+			cleanupService := appimagecleanup.NewService(reportRepo, announcementRepo, presigner, realClock, cleanupPolicy, log.Printf)
+			imageCleanupCron = cron.New()
+			if _, err := imageCleanupCron.AddFunc(cfg.R2Cleanup.Cron, func() {
+				runImageCleanup(context.Background(), db, cleanupService)
+			}); err != nil {
+				// config.Load already validates the cron spec, so this would
+				// mean the two parsers disagree — extremely unlikely, but
+				// never worth failing boot over.
+				log.Printf("R2 image cleanup disabled: invalid cron schedule %q: %v", cfg.R2Cleanup.Cron, err)
+				imageCleanupCron = nil
+			} else {
+				imageCleanupCron.Start()
+				log.Printf("R2 image cleanup scheduled: cron=%q dry_run=%v", cfg.R2Cleanup.Cron, cleanupPolicy.DryRun)
+			}
+		}
+	} else {
+		log.Printf("R2 image cleanup disabled (R2_CLEANUP_ENABLED=false)")
+	}
 
 	// nil when GISTDA isn't configured: the layer endpoint answers 404 and
 	// /config/public reports it off.
@@ -165,8 +207,30 @@ func run() error {
 	case <-ctx.Done():
 	}
 
+	if imageCleanupCron != nil {
+		<-imageCleanupCron.Stop().Done() // let an in-flight run finish before we close the DB pool
+	}
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	log.Println("shutting down")
 	return srv.Shutdown(shutdownCtx)
+}
+
+// runImageCleanup takes the cross-replica advisory lock before running one
+// cleanup pass, so at most one replica does this at a time; if another
+// replica already holds it, this run is skipped entirely (safe: nothing is
+// lost, the next scheduled run tries again).
+func runImageCleanup(ctx context.Context, db *sql.DB, svc *appimagecleanup.Service) {
+	release, ok, err := postgres.TryAdvisoryLock(ctx, db)
+	if err != nil {
+		log.Printf("R2 image cleanup: could not acquire advisory lock: %v", err)
+		return
+	}
+	defer release()
+	if !ok {
+		log.Printf("R2 image cleanup: another instance is already running, skipping this cycle")
+		return
+	}
+	svc.Run(ctx)
 }

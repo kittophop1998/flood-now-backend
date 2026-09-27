@@ -105,3 +105,78 @@ func TestLoadBootsWithDOHCCTVMisconfigured(t *testing.T) {
 		t.Errorf("cctv = %+v warning = %q", cfg.DOHCCTV, cfg.DOHCCTVWarning)
 	}
 }
+
+func TestR2CleanupConfig(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		c, warning := loadR2Cleanup()
+		if !c.Enabled || c.Cron != defaultR2CleanupCron || c.OrphanRetention != defaultR2OrphanRetention ||
+			c.ResolvedRetention != defaultR2ResolvedImageRetention || c.BatchSize != defaultR2CleanupBatchSize || c.DryRun {
+			t.Errorf("got %+v", c)
+		}
+		if warning != "" {
+			t.Errorf("warning = %q, want none", warning)
+		}
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		t.Setenv("R2_CLEANUP_ENABLED", "false")
+		c, _ := loadR2Cleanup()
+		if c.Enabled {
+			t.Error("expected disabled")
+		}
+	})
+
+	t.Run("dry run and custom values", func(t *testing.T) {
+		t.Setenv("R2_CLEANUP_DRY_RUN", "true")
+		t.Setenv("R2_ORPHAN_RETENTION_HOURS", "48")
+		t.Setenv("R2_RESOLVED_IMAGE_RETENTION_DAYS", "14")
+		t.Setenv("R2_CLEANUP_BATCH_SIZE", "25")
+		t.Setenv("R2_CLEANUP_CRON", "*/15 * * * *")
+		c, warning := loadR2Cleanup()
+		if !c.DryRun || c.OrphanRetention != 48*time.Hour || c.ResolvedRetention != 14*24*time.Hour || c.BatchSize != 25 || c.Cron != "*/15 * * * *" {
+			t.Errorf("got %+v", c)
+		}
+		if warning != "" {
+			t.Errorf("warning = %q, want none", warning)
+		}
+	})
+
+	t.Run("invalid cron falls back to default", func(t *testing.T) {
+		t.Setenv("R2_CLEANUP_CRON", "not a cron expression")
+		c, warning := loadR2Cleanup()
+		if c.Cron != defaultR2CleanupCron {
+			t.Errorf("cron = %q, want fallback to default", c.Cron)
+		}
+		if !strings.Contains(warning, "R2_CLEANUP_CRON") {
+			t.Errorf("warning = %q, want mention of R2_CLEANUP_CRON", warning)
+		}
+	})
+
+	t.Run("invalid durations and batch size fall back to defaults", func(t *testing.T) {
+		t.Setenv("R2_ORPHAN_RETENTION_HOURS", "not-a-number")
+		t.Setenv("R2_RESOLVED_IMAGE_RETENTION_DAYS", "0")
+		t.Setenv("R2_CLEANUP_BATCH_SIZE", "-1")
+		c, warning := loadR2Cleanup()
+		if c.OrphanRetention != defaultR2OrphanRetention || c.ResolvedRetention != defaultR2ResolvedImageRetention || c.BatchSize != defaultR2CleanupBatchSize {
+			t.Errorf("got %+v", c)
+		}
+		for _, want := range []string{"R2_ORPHAN_RETENTION_HOURS", "R2_RESOLVED_IMAGE_RETENTION_DAYS", "R2_CLEANUP_BATCH_SIZE"} {
+			if !strings.Contains(warning, want) {
+				t.Errorf("warning = %q, want mention of %q", warning, want)
+			}
+		}
+	})
+}
+
+func TestLoadBootsWithR2CleanupMisconfigured(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("R2_CLEANUP_CRON", "garbage")
+	t.Setenv("R2_CLEANUP_BATCH_SIZE", "not-a-number")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("R2 cleanup config must never block boot: %v", err)
+	}
+	if cfg.R2Cleanup.Cron != defaultR2CleanupCron || cfg.R2Cleanup.BatchSize != defaultR2CleanupBatchSize || cfg.R2CleanupWarning == "" {
+		t.Errorf("r2cleanup = %+v warning = %q", cfg.R2Cleanup, cfg.R2CleanupWarning)
+	}
+}

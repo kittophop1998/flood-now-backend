@@ -24,3 +24,7 @@ make test
 ## Env vars
 
 See `.env.example`. `R2_*` / `IMAGEKIT_BASE_URL` are only required for the presign/image-delivery flow to actually work against Cloudflare; the rest of the API runs without them.
+
+## Scheduled jobs
+
+A daily R2 image cleanup runs in-process (`R2_CLEANUP_*` env vars; see [`/docs/database.md#image-cleanup`](../../docs/database.md#image-cleanup)). Set `R2_CLEANUP_DRY_RUN=true` to see what it would delete before trusting it in production.

@@ -139,6 +139,28 @@ type ReportRepository interface {
 	// updated report; nil if the report doesn't exist. Idempotent when the
 	// device had no reaction.
 	RemoveReaction(ctx context.Context, reportID uuid.UUID, deviceID string) (*report.ReportWithStats, error)
+
+	// ImageCleanupCandidates returns reports with a non-null image_key whose
+	// lifecycle ended (resolved or expired) at or before cutoff, oldest
+	// first, up to limit. Used only by the image cleanup job.
+	ImageCleanupCandidates(ctx context.Context, cutoff time.Time, limit int) ([]ImageCleanupCandidate, error)
+	// ImageKeyReferenced reports whether any report still carries key as its
+	// image_key (used to protect a candidate object found by listing R2).
+	ImageKeyReferenced(ctx context.Context, key string) (bool, error)
+	// ClearImageIfUnchanged nulls a report's image_key after its R2 object
+	// was deleted, but only if it still equals key (a no-op, not an error,
+	// if the report moved on since the candidate was read). ok reports
+	// whether it cleared the column.
+	ClearImageIfUnchanged(ctx context.Context, reportID uuid.UUID, key string) (ok bool, err error)
+}
+
+// ImageCleanupCandidate is a report whose image is a candidate for deletion
+// because the report itself is resolved/expired past retention.
+type ImageCleanupCandidate struct {
+	ReportID   uuid.UUID
+	ImageKey   string
+	ResolvedAt *time.Time
+	ExpiresAt  time.Time
 }
 
 // NotificationQuery selects report events relevant to a device's follows.
@@ -287,6 +309,27 @@ type AnnouncementRepository interface {
 	Create(ctx context.Context, a *announcement.Announcement) error
 	Update(ctx context.Context, a *announcement.Announcement) error
 	Delete(ctx context.Context, id uuid.UUID) (bool, error)
+
+	// ExpiredImageCandidates returns announcements that ended at or before
+	// cutoff and still carry at least one image, oldest first, up to limit.
+	// Used only by the image cleanup job.
+	ExpiredImageCandidates(ctx context.Context, cutoff time.Time, limit int) ([]AnnouncementImageCandidate, error)
+	// ImageKeyReferenced reports whether any announcement's images still
+	// include key (used to protect a candidate object found by listing R2).
+	ImageKeyReferenced(ctx context.Context, key string) (bool, error)
+	// RemoveImageIfPresent drops key from an announcement's images after its
+	// R2 object was deleted, but only if it is still present (a no-op, not
+	// an error, if the announcement was edited since the candidate was
+	// read). ok reports whether it removed the entry.
+	RemoveImageIfPresent(ctx context.Context, announcementID uuid.UUID, key string) (ok bool, err error)
+}
+
+// AnnouncementImageCandidate is one image on an announcement whose window
+// has ended, a candidate for deletion once past retention.
+type AnnouncementImageCandidate struct {
+	AnnouncementID uuid.UUID
+	ImageKey       string
+	EndsAt         time.Time
 }
 
 // ComplaintParams is the atomic write for a new complaint: insert it (a
@@ -325,6 +368,30 @@ type ModerationRepository interface {
 // (Cloudflare R2). Implemented by the storage adapter.
 type Presigner interface {
 	PresignUpload(ctx context.Context, objectKey, contentType string, contentLength int64) (uploadURL string, expiresIn time.Duration, err error)
+}
+
+// ObjectSummary is one object found while listing a storage prefix.
+type ObjectSummary struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+}
+
+// ImageStore lists and deletes objects in R2, for the image cleanup job
+// only — no other use case touches storage beyond presigning an upload.
+// Implemented by the storage adapter.
+type ImageStore interface {
+	// ListObjects pages through prefix, returning only objects with
+	// LastModified at or before olderThan (a page can come back smaller than
+	// maxKeys once that filter is applied). pageToken is "" for the first
+	// page; nextToken is "" once there are no more pages.
+	ListObjects(ctx context.Context, prefix string, olderThan time.Time, pageToken string, maxKeys int32) (objects []ObjectSummary, nextToken string, err error)
+	// DeleteObjects deletes keys (chunked internally to the provider's
+	// per-call limit). A missing object is not an error — R2/S3 batch
+	// delete is idempotent. failed maps any key that a provider error
+	// prevented from being deleted to that error, so the caller can leave
+	// its DB metadata untouched and retry next run.
+	DeleteObjects(ctx context.Context, keys []string) (failed map[string]string, err error)
 }
 
 // Geocoder resolves place names ⇄ coordinates via an external provider.

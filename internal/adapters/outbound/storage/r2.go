@@ -15,18 +15,19 @@ import (
 const presignTTL = 5 * time.Minute
 
 type R2Presigner struct {
+	raw    *s3.Client
 	client *s3.PresignClient
 	bucket string
 }
 
 func NewR2Presigner(accountID, accessKeyID, secretAccessKey, endpoint, bucket string) *R2Presigner {
-	client := s3.New(s3.Options{
+	raw := s3.New(s3.Options{
 		Region:       "auto",
 		BaseEndpoint: aws.String(endpoint),
 		Credentials:  credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, ""),
 		UsePathStyle: true, // Cloudflare R2's documented S3-compatible addressing mode
 	})
-	return &R2Presigner{client: s3.NewPresignClient(client, s3.WithPresignExpires(presignTTL)), bucket: bucket}
+	return &R2Presigner{raw: raw, client: s3.NewPresignClient(raw, s3.WithPresignExpires(presignTTL)), bucket: bucket}
 }
 
 func (p *R2Presigner) PresignUpload(ctx context.Context, objectKey, contentType string, contentLength int64) (string, time.Duration, error) {
