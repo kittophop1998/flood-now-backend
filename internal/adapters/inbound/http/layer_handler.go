@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -109,12 +110,24 @@ func (h *ImportantPlaceHandler) Delete(c *gin.Context) {
 
 // AnnouncementHandler serves official announcements.
 type AnnouncementHandler struct {
-	service *appannouncement.Service
-	clock   ports.Clock
+	service      *appannouncement.Service
+	clock        ports.Clock
+	imageBaseURL string
+	imageURLFn   func(baseURL, objectKey string) string
 }
 
-func NewAnnouncementHandler(service *appannouncement.Service, clock ports.Clock) *AnnouncementHandler {
-	return &AnnouncementHandler{service: service, clock: clock}
+func NewAnnouncementHandler(service *appannouncement.Service, clock ports.Clock, imageBaseURL string, imageURLFn func(string, string) string) *AnnouncementHandler {
+	return &AnnouncementHandler{service: service, clock: clock, imageBaseURL: imageBaseURL, imageURLFn: imageURLFn}
+}
+
+func (h *AnnouncementHandler) respond(a domainannouncement.Announcement, now time.Time) announcementResponse {
+	return toAnnouncementResponse(a, now, func(key string) *string {
+		if h.imageBaseURL == "" {
+			return nil
+		}
+		u := h.imageURLFn(h.imageBaseURL, key)
+		return &u
+	})
 }
 
 func (h *AnnouncementHandler) List(c *gin.Context) {
@@ -142,7 +155,7 @@ func (h *AnnouncementHandler) Get(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toAnnouncementResponse(*a, h.clock.Now()))
+	c.JSON(http.StatusOK, h.respond(*a, h.clock.Now()))
 }
 
 func (h *AnnouncementHandler) AdminList(c *gin.Context) {
@@ -158,7 +171,7 @@ func (h *AnnouncementHandler) writeList(c *gin.Context, items []domainannounceme
 	now := h.clock.Now()
 	out := make([]announcementResponse, 0, len(items))
 	for _, a := range items {
-		out = append(out, toAnnouncementResponse(a, now))
+		out = append(out, h.respond(a, now))
 	}
 	c.JSON(http.StatusOK, gin.H{"announcements": out})
 }
@@ -173,7 +186,7 @@ func (h *AnnouncementHandler) Create(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, toAnnouncementResponse(*a, h.clock.Now()))
+	c.JSON(http.StatusCreated, h.respond(*a, h.clock.Now()))
 }
 
 func (h *AnnouncementHandler) Update(c *gin.Context) {
@@ -190,7 +203,7 @@ func (h *AnnouncementHandler) Update(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toAnnouncementResponse(*a, h.clock.Now()))
+	c.JSON(http.StatusOK, h.respond(*a, h.clock.Now()))
 }
 
 func (h *AnnouncementHandler) setPublished(c *gin.Context, publish bool) {
@@ -203,7 +216,7 @@ func (h *AnnouncementHandler) setPublished(c *gin.Context, publish bool) {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toAnnouncementResponse(*a, h.clock.Now()))
+	c.JSON(http.StatusOK, h.respond(*a, h.clock.Now()))
 }
 
 func (h *AnnouncementHandler) Publish(c *gin.Context)   { h.setPublished(c, true) }

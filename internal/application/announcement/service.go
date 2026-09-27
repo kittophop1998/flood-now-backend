@@ -75,7 +75,7 @@ func (s *Service) Create(ctx context.Context, in announcement.Fields, publish bo
 		return nil, err
 	}
 	now := s.clock.Now()
-	a := &announcement.Announcement{ID: uuid.New(), CreatedAt: now, UpdatedAt: now}
+	a := &announcement.Announcement{ID: uuid.New(), Images: []announcement.Image{}, CreatedAt: now, UpdatedAt: now}
 	if err := in.Apply(a); err != nil {
 		return nil, err
 	}

@@ -13,6 +13,7 @@ import (
 
 	"floodnow-api/internal/domain/apperr"
 	"floodnow-api/internal/domain/report"
+	"floodnow-api/internal/domain/upload"
 )
 
 type Type string
@@ -27,15 +28,74 @@ const (
 	TypeConstruction Type = "construction"
 	TypeSafetyNotice Type = "safety_notice" // local safety / emergency notice
 	TypeGeneral      Type = "general"
+
+	TypeTrafficNotice     Type = "traffic_notice"
+	TypeAccidentEmergency Type = "accident_emergency"
+	TypePowerUtility      Type = "power_utility" // power / water supply / utility interruption
+	TypeServiceDisruption Type = "service_disruption"
 )
 
+var types = []Type{
+	TypeFloodWarning, TypeEvacuation, TypeRoadClosure, TypeWaterRelease, TypeWeather, TypeShelterInfo,
+	TypeConstruction, TypeSafetyNotice, TypeGeneral,
+	TypeTrafficNotice, TypeAccidentEmergency, TypePowerUtility, TypeServiceDisruption,
+}
+
 func (t Type) Valid() bool {
-	switch t {
-	case TypeFloodWarning, TypeEvacuation, TypeRoadClosure, TypeWaterRelease, TypeWeather, TypeShelterInfo,
-		TypeConstruction, TypeSafetyNotice, TypeGeneral:
-		return true
+	for _, v := range types {
+		if t == v {
+			return true
+		}
 	}
 	return false
+}
+
+// SeverityInfo is an announcement-only level below the report scale: a
+// notice that is worth knowing but not a hazard (a service change, a
+// general notice). Reports never use it.
+const SeverityInfo report.Severity = "info"
+
+func validSeverity(s report.Severity) bool { return s == SeverityInfo || s.Valid() }
+
+// MaxImages caps the images attached to one announcement.
+const MaxImages = 5
+
+// Image is an attached photo: an object key minted by the admin presign
+// endpoint (upload.AnnouncementKeyPrefix), plus optional pixel size so
+// clients can lay it out before it loads. Order in the slice = display
+// order, the first is the cover.
+type Image struct {
+	Key    string `json:"key"`
+	Width  *int   `json:"width,omitempty"`
+	Height *int   `json:"height,omitempty"`
+}
+
+// validImageKey accepts only a plain announcement object key — never a URL,
+// a report photo key, or a path escaping the prefix.
+func validImageKey(key string) bool {
+	return strings.HasPrefix(key, upload.AnnouncementKeyPrefix) && len(key) <= 300 &&
+		!strings.Contains(key, "..") && !strings.Contains(key, "://") && strings.TrimSpace(key) == key
+}
+
+func validateImages(images []Image, fields map[string]string) {
+	if len(images) > MaxImages {
+		fields["images"] = "at most " + strconv.Itoa(MaxImages) + " images"
+		return
+	}
+	seen := map[string]bool{}
+	for i, img := range images {
+		name := "images." + strconv.Itoa(i)
+		switch {
+		case !validImageKey(img.Key):
+			fields[name] = "image_key must be an object key returned by /admin/uploads/presign"
+		case seen[img.Key]:
+			fields[name] = "duplicate image"
+		case img.Width != nil && (*img.Width < 1 || *img.Width > 20000),
+			img.Height != nil && (*img.Height < 1 || *img.Height > 20000):
+			fields[name] = "width/height must be 1-20000"
+		}
+		seen[img.Key] = true
+	}
 }
 
 // Status is derived from publication and the time window, never stored.
@@ -59,6 +119,7 @@ type Announcement struct {
 	Latitude    *float64
 	Longitude   *float64
 	RadiusM     *int
+	Images      []Image
 	StartsAt    time.Time
 	EndsAt      *time.Time
 	PublishedAt *time.Time
@@ -83,7 +144,8 @@ func (a Announcement) Status(now time.Time) Status {
 const ExpiredLookback = 7 * 24 * time.Hour
 
 // Fields is the editable part of an announcement; nil = unchanged on update.
-// ClearLocation removes the affected area.
+// ClearLocation removes the affected area; a non-nil empty Images removes
+// every image.
 type Fields struct {
 	Title         *string
 	Body          *string
@@ -95,6 +157,7 @@ type Fields struct {
 	Longitude     *float64
 	RadiusM       *int
 	ClearLocation bool
+	Images        *[]Image
 	StartsAt      *time.Time
 	EndsAt        *time.Time
 	ClearEndsAt   bool
@@ -118,14 +181,18 @@ func (f Fields) Validate(requireAll bool) error {
 	check("source_name", f.SourceName, 200)
 	if f.Type != nil {
 		if !f.Type.Valid() {
-			fields["type"] = "must be one of flood_warning, evacuation, road_closure, water_release, weather, shelter_info, construction, safety_notice, general"
+			names := make([]string, len(types))
+			for i, v := range types {
+				names[i] = string(v)
+			}
+			fields["type"] = "must be one of " + strings.Join(names, ", ")
 		}
 	} else if requireAll {
 		fields["type"] = "is required"
 	}
 	if f.Severity != nil {
-		if !f.Severity.Valid() {
-			fields["severity"] = "must be one of low, moderate, high, critical"
+		if !validSeverity(*f.Severity) {
+			fields["severity"] = "must be one of info, low, moderate, high, critical"
 		}
 	} else if requireAll {
 		fields["severity"] = "is required"
@@ -143,6 +210,9 @@ func (f Fields) Validate(requireAll bool) error {
 	}
 	if f.RadiusM != nil && (*f.RadiusM < 100 || *f.RadiusM > 200_000) {
 		fields["radius_m"] = "must be between 100 and 200000"
+	}
+	if f.Images != nil {
+		validateImages(*f.Images, fields)
 	}
 	if f.StartsAt == nil && requireAll {
 		fields["starts_at"] = "is required"
@@ -186,6 +256,9 @@ func (f Fields) Apply(a *Announcement) error {
 	}
 	if f.RadiusM != nil {
 		a.RadiusM = f.RadiusM
+	}
+	if f.Images != nil {
+		a.Images = append([]Image{}, *f.Images...)
 	}
 	if f.StartsAt != nil {
 		a.StartsAt = f.StartsAt.UTC()

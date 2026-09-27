@@ -11,6 +11,14 @@ import (
 
 const MaxImageBytes int64 = 8 * 1024 * 1024 // 8 MiB
 
+// Object key prefixes. Report photos come from the public presign endpoint;
+// announcement images only from the admin one, so a key under
+// AnnouncementKeyPrefix can only have been minted by an operator.
+const (
+	ReportKeyPrefix       = "reports/"
+	AnnouncementKeyPrefix = "announcements/"
+)
+
 // allowedContentTypes maps an accepted image content type to the file
 // extension used when building the stored object key.
 var allowedContentTypes = map[string]string{

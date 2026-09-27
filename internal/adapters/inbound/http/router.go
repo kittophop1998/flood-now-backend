@@ -110,6 +110,7 @@ func NewRouter(deps Deps) *gin.Engine {
 		admin.POST("/announcements/:id/publish", deps.AnnouncementHandler.Publish)
 		admin.POST("/announcements/:id/unpublish", deps.AnnouncementHandler.Unpublish)
 		admin.DELETE("/announcements/:id", deps.AnnouncementHandler.Delete)
+		admin.POST("/uploads/presign", deps.UploadHandler.AdminPresign)
 
 		admin.POST("/important-places", deps.ImportantPlaceHandler.Create)
 		admin.PATCH("/important-places/:id", deps.ImportantPlaceHandler.Update)

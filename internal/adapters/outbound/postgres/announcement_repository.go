@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -21,15 +22,34 @@ func NewAnnouncementRepository(db *sql.DB) *AnnouncementRepository {
 }
 
 const announcementColumns = `a.id, a.title, a.body, a.type, a.severity, a.source_name, a.source_url,
-	a.latitude, a.longitude, a.radius_m, a.starts_at, a.ends_at, a.published_at, a.created_at, a.updated_at`
+	a.latitude, a.longitude, a.radius_m, a.images, a.starts_at, a.ends_at, a.published_at, a.created_at, a.updated_at`
 
 func scanAnnouncement(row rowScanner) (*announcement.Announcement, error) {
 	var a announcement.Announcement
+	var images []byte
 	if err := row.Scan(&a.ID, &a.Title, &a.Body, &a.Type, &a.Severity, &a.SourceName, &a.SourceURL,
-		&a.Latitude, &a.Longitude, &a.RadiusM, &a.StartsAt, &a.EndsAt, &a.PublishedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&a.Latitude, &a.Longitude, &a.RadiusM, &images, &a.StartsAt, &a.EndsAt, &a.PublishedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
+	a.Images = []announcement.Image{}
+	if len(images) > 0 {
+		if err := json.Unmarshal(images, &a.Images); err != nil {
+			return nil, fmt.Errorf("decode announcement images: %w", err)
+		}
+	}
 	return &a, nil
+}
+
+// imagesColumn encodes images for the jsonb column (always an array).
+func imagesColumn(images []announcement.Image) (string, error) {
+	if images == nil {
+		images = []announcement.Image{}
+	}
+	b, err := json.Marshal(images)
+	if err != nil {
+		return "", fmt.Errorf("encode announcement images: %w", err)
+	}
+	return string(b), nil
 }
 
 func (repo *AnnouncementRepository) List(ctx context.Context, f ports.AnnouncementFilter) ([]announcement.Announcement, error) {
@@ -58,7 +78,7 @@ func (repo *AnnouncementRepository) List(ctx context.Context, f ports.Announceme
 			a.longitude - COALESCE(a.radius_m, 0) / (111320.0 * GREATEST(cos(radians(a.latitude)), 0.01)) <= ` + b.arg(box.MaxLng) + `))`)
 	}
 	query := `SELECT ` + announcementColumns + ` FROM announcements a` + b.whereSQL() + `
-		ORDER BY CASE a.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'moderate' THEN 2 ELSE 1 END DESC,
+		ORDER BY CASE a.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'moderate' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC,
 			a.starts_at DESC
 		LIMIT ` + b.arg(f.Limit)
 	rows, err := repo.db.QueryContext(ctx, query, b.args...)
@@ -89,12 +109,16 @@ func (repo *AnnouncementRepository) Get(ctx context.Context, id uuid.UUID) (*ann
 }
 
 func (repo *AnnouncementRepository) Create(ctx context.Context, a *announcement.Announcement) error {
-	_, err := repo.db.ExecContext(ctx, `
+	images, err := imagesColumn(a.Images)
+	if err != nil {
+		return err
+	}
+	_, err = repo.db.ExecContext(ctx, `
 		INSERT INTO announcements (id, title, body, type, severity, source_name, source_url, latitude, longitude, radius_m,
-			starts_at, ends_at, published_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			starts_at, ends_at, published_at, created_at, updated_at, images)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)`,
 		a.ID, a.Title, a.Body, a.Type, a.Severity, a.SourceName, a.SourceURL, a.Latitude, a.Longitude, a.RadiusM,
-		a.StartsAt, a.EndsAt, a.PublishedAt, a.CreatedAt, a.UpdatedAt)
+		a.StartsAt, a.EndsAt, a.PublishedAt, a.CreatedAt, a.UpdatedAt, images)
 	if err != nil {
 		return fmt.Errorf("insert announcement: %w", err)
 	}
@@ -102,12 +126,17 @@ func (repo *AnnouncementRepository) Create(ctx context.Context, a *announcement.
 }
 
 func (repo *AnnouncementRepository) Update(ctx context.Context, a *announcement.Announcement) error {
-	_, err := repo.db.ExecContext(ctx, `
+	images, err := imagesColumn(a.Images)
+	if err != nil {
+		return err
+	}
+	_, err = repo.db.ExecContext(ctx, `
 		UPDATE announcements SET title = $1, body = $2, type = $3, severity = $4, source_name = $5, source_url = $6,
-			latitude = $7, longitude = $8, radius_m = $9, starts_at = $10, ends_at = $11, published_at = $12, updated_at = $13
+			latitude = $7, longitude = $8, radius_m = $9, starts_at = $10, ends_at = $11, published_at = $12, updated_at = $13,
+			images = $15::jsonb
 		WHERE id = $14`,
 		a.Title, a.Body, a.Type, a.Severity, a.SourceName, a.SourceURL, a.Latitude, a.Longitude, a.RadiusM,
-		a.StartsAt, a.EndsAt, a.PublishedAt, a.UpdatedAt, a.ID)
+		a.StartsAt, a.EndsAt, a.PublishedAt, a.UpdatedAt, a.ID, images)
 	if err != nil {
 		return fmt.Errorf("update announcement: %w", err)
 	}

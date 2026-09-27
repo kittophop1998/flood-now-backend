@@ -59,3 +59,57 @@ func TestFieldsValidateAndApply(t *testing.T) {
 		t.Error("ends_at before starts_at must be rejected")
 	}
 }
+
+func TestGenericTypesAndInfoSeverity(t *testing.T) {
+	for _, typ := range []Type{TypeTrafficNotice, TypeAccidentEmergency, TypePowerUtility, TypeServiceDisruption, TypeWaterRelease, TypeGeneral} {
+		if !typ.Valid() {
+			t.Errorf("%s should be valid", typ)
+		}
+	}
+	if Type("flood").Valid() {
+		t.Error("unknown type accepted")
+	}
+	info := SeverityInfo
+	if err := (Fields{Severity: &info}).Validate(false); err != nil {
+		t.Errorf("info severity rejected: %v", err)
+	}
+	bad := report.Severity("urgent")
+	if err := (Fields{Severity: &bad}).Validate(false); err == nil {
+		t.Error("unknown severity accepted")
+	}
+}
+
+func TestImagesValidateAndApply(t *testing.T) {
+	img := func(key string) Image { return Image{Key: key, Width: ptr(1200), Height: ptr(800)} }
+	ok := []Image{img("announcements/2026/09/27/a.jpg"), img("announcements/2026/09/27/b.webp")}
+	if err := (Fields{Images: &ok}).Validate(false); err != nil {
+		t.Fatalf("valid images rejected: %v", err)
+	}
+	cases := map[string][]Image{
+		"too many":       {img("announcements/1"), img("announcements/2"), img("announcements/3"), img("announcements/4"), img("announcements/5"), img("announcements/6")},
+		"report key":     {img("reports/2026/09/27/a.jpg")},
+		"url":            {img("https://evil.example/announcements/a.jpg")},
+		"path escape":    {img("announcements/../secrets")},
+		"duplicate":      {img("announcements/a.jpg"), img("announcements/a.jpg")},
+		"bad dimensions": {{Key: "announcements/a.jpg", Width: ptr(0)}},
+		"empty key":      {{Key: ""}},
+		"padded key":     {{Key: " announcements/a.jpg"}},
+	}
+	for name, images := range cases {
+		if err := (Fields{Images: &images}).Validate(false); err == nil {
+			t.Errorf("%s: invalid images accepted", name)
+		}
+	}
+
+	a := Announcement{StartsAt: now}
+	if err := (Fields{Images: &ok}).Apply(&a); err != nil || len(a.Images) != 2 || a.Images[0].Key != ok[0].Key {
+		t.Fatalf("images not applied in order: %v %+v", err, a.Images)
+	}
+	if err := (Fields{Title: ptr("x")}).Apply(&a); err != nil || len(a.Images) != 2 {
+		t.Error("an update without images must keep them")
+	}
+	empty := []Image{}
+	if err := (Fields{Images: &empty}).Apply(&a); err != nil || len(a.Images) != 0 {
+		t.Error("an empty images list must clear them")
+	}
+}

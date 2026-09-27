@@ -600,48 +600,69 @@ func (req importantPlaceRequest) toDomain() domainplace.Fields {
 // --- Announcements ---
 
 type announcementResponse struct {
-	ID          string     `json:"id"`
-	Title       string     `json:"title"`
-	Body        string     `json:"body"`
-	Type        string     `json:"type"`
-	Severity    string     `json:"severity"`
-	SourceName  string     `json:"source_name"`
-	SourceURL   *string    `json:"source_url"`
-	Latitude    *float64   `json:"latitude"`
-	Longitude   *float64   `json:"longitude"`
-	RadiusM     *int       `json:"radius_m"`
-	StartsAt    time.Time  `json:"starts_at"`
-	EndsAt      *time.Time `json:"ends_at"`
-	Status      string     `json:"status"`
-	PublishedAt *time.Time `json:"published_at"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID          string                 `json:"id"`
+	Title       string                 `json:"title"`
+	Body        string                 `json:"body"`
+	Type        string                 `json:"type"`
+	Severity    string                 `json:"severity"`
+	SourceName  string                 `json:"source_name"`
+	SourceURL   *string                `json:"source_url"`
+	Latitude    *float64               `json:"latitude"`
+	Longitude   *float64               `json:"longitude"`
+	RadiusM     *int                   `json:"radius_m"`
+	Images      []announcementImageDTO `json:"images"`
+	StartsAt    time.Time              `json:"starts_at"`
+	EndsAt      *time.Time             `json:"ends_at"`
+	Status      string                 `json:"status"`
+	PublishedAt *time.Time             `json:"published_at"`
+	CreatedAt   time.Time              `json:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at"`
 }
 
-func toAnnouncementResponse(a domainannouncement.Announcement, now time.Time) announcementResponse {
+// announcementImageDTO is one attached image; image_url is derived from the
+// key (null when no image CDN is configured).
+type announcementImageDTO struct {
+	ImageKey string  `json:"image_key"`
+	ImageURL *string `json:"image_url,omitempty"`
+	Width    *int    `json:"width"`
+	Height   *int    `json:"height"`
+}
+
+func toAnnouncementResponse(a domainannouncement.Announcement, now time.Time, imageURL func(string) *string) announcementResponse {
+	images := make([]announcementImageDTO, 0, len(a.Images))
+	for _, img := range a.Images {
+		images = append(images, announcementImageDTO{ImageKey: img.Key, ImageURL: imageURL(img.Key), Width: img.Width, Height: img.Height})
+	}
 	return announcementResponse{
 		ID: a.ID.String(), Title: a.Title, Body: a.Body, Type: string(a.Type), Severity: string(a.Severity),
 		SourceName: a.SourceName, SourceURL: a.SourceURL, Latitude: a.Latitude, Longitude: a.Longitude, RadiusM: a.RadiusM,
-		StartsAt: a.StartsAt.UTC(), EndsAt: utcPtr(a.EndsAt), Status: string(a.Status(now)),
+		Images: images, StartsAt: a.StartsAt.UTC(), EndsAt: utcPtr(a.EndsAt), Status: string(a.Status(now)),
 		PublishedAt: utcPtr(a.PublishedAt), CreatedAt: a.CreatedAt.UTC(), UpdatedAt: a.UpdatedAt.UTC(),
 	}
 }
 
 type announcementRequest struct {
-	Title         *string    `json:"title"`
-	Body          *string    `json:"body"`
-	Type          *string    `json:"type"`
-	Severity      *string    `json:"severity"`
-	SourceName    *string    `json:"source_name"`
-	SourceURL     *string    `json:"source_url"`
-	Latitude      *float64   `json:"latitude"`
-	Longitude     *float64   `json:"longitude"`
-	RadiusM       *int       `json:"radius_m"`
-	ClearLocation bool       `json:"clear_location"`
-	StartsAt      *time.Time `json:"starts_at"`
-	EndsAt        *time.Time `json:"ends_at"`
-	ClearEndsAt   bool       `json:"clear_ends_at"`
-	Publish       bool       `json:"publish"`
+	Title         *string                     `json:"title"`
+	Body          *string                     `json:"body"`
+	Type          *string                     `json:"type"`
+	Severity      *string                     `json:"severity"`
+	SourceName    *string                     `json:"source_name"`
+	SourceURL     *string                     `json:"source_url"`
+	Latitude      *float64                    `json:"latitude"`
+	Longitude     *float64                    `json:"longitude"`
+	RadiusM       *int                        `json:"radius_m"`
+	ClearLocation bool                        `json:"clear_location"`
+	Images        *[]announcementImageRequest `json:"images"`
+	StartsAt      *time.Time                  `json:"starts_at"`
+	EndsAt        *time.Time                  `json:"ends_at"`
+	ClearEndsAt   bool                        `json:"clear_ends_at"`
+	Publish       bool                        `json:"publish"`
+}
+
+type announcementImageRequest struct {
+	ImageKey string `json:"image_key"`
+	Width    *int   `json:"width"`
+	Height   *int   `json:"height"`
 }
 
 func (req announcementRequest) toDomain() domainannouncement.Fields {
@@ -657,6 +678,13 @@ func (req announcementRequest) toDomain() domainannouncement.Fields {
 	if req.Severity != nil {
 		s := domainreport.Severity(*req.Severity)
 		f.Severity = &s
+	}
+	if req.Images != nil {
+		images := make([]domainannouncement.Image, 0, len(*req.Images))
+		for _, img := range *req.Images {
+			images = append(images, domainannouncement.Image{Key: img.ImageKey, Width: img.Width, Height: img.Height})
+		}
+		f.Images = &images
 	}
 	return f
 }

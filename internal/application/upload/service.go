@@ -29,13 +29,24 @@ type Result struct {
 	ExpiresIn time.Duration
 }
 
+// Presign signs a report photo upload.
 func (s *Service) Presign(ctx context.Context, req upload.Request) (*Result, error) {
+	return s.presign(ctx, upload.ReportKeyPrefix, req)
+}
+
+// PresignAnnouncementImage signs an official-announcement image upload
+// (admin only — the route is behind the operator token).
+func (s *Service) PresignAnnouncementImage(ctx context.Context, req upload.Request) (*Result, error) {
+	return s.presign(ctx, upload.AnnouncementKeyPrefix, req)
+}
+
+func (s *Service) presign(ctx context.Context, prefix string, req upload.Request) (*Result, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
 
 	now := s.clock.Now()
-	objectKey := fmt.Sprintf("reports/%s/%s.%s", now.Format("2006/01/02"), uuid.New().String(), req.Extension())
+	objectKey := fmt.Sprintf("%s%s/%s.%s", prefix, now.Format("2006/01/02"), uuid.New().String(), req.Extension())
 
 	url, expiresIn, err := s.presigner.PresignUpload(ctx, objectKey, req.ContentType, req.ContentLength)
 	if err != nil {

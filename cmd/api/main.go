@@ -136,7 +136,7 @@ func run() error {
 		RouteHandler:          inboundhttp.NewRouteHandler(routeService, presenter),
 		SOSHandler:            inboundhttp.NewSOSHandler(sosService),
 		ImportantPlaceHandler: inboundhttp.NewImportantPlaceHandler(importantPlaceService),
-		AnnouncementHandler:   inboundhttp.NewAnnouncementHandler(announcementService, realClock),
+		AnnouncementHandler:   inboundhttp.NewAnnouncementHandler(announcementService, realClock, cfg.ImageKitBaseURL, storage.ImageURL),
 		ModerationHandler:     inboundhttp.NewModerationHandler(moderationService, presenter),
 		ConfigHandler:         inboundhttp.NewConfigHandler(donationCfg, floodService != nil, cctvService != nil),
 		OfficialFloodHandler:  inboundhttp.NewOfficialFloodHandler(floodService),
