@@ -532,3 +532,50 @@ func TestServiceConfirmUpdateValidation(t *testing.T) {
 	})
 	assertCode(t, err, apperr.CodeValidation)
 }
+
+func TestServiceConfirmUpdateDetailsFollowTheCategory(t *testing.T) {
+	svc, repo, _ := newTestService(t0)
+	in := validInput()
+	in.Type = domainreport.TypeAccident
+	in.Details = domainreport.Details{"lanes_blocked": "one"}
+	created, err := svc.Create(context.Background(), in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.Details["lanes_blocked"] != "one" {
+		t.Fatalf("details not stored: %v", created.Details)
+	}
+
+	if _, err := svc.Confirm(context.Background(), created.ID, domainreport.NewConfirmationInput{
+		DeviceID: deviceA, Status: domainreport.StatusStillActive,
+		Update: domainreport.ConditionUpdate{Details: domainreport.Details{"lanes_blocked": "all", "closure": "full"}},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u := repo.lastConfirm.Update; u == nil || len(u.Details) != 1 || u.Details["lanes_blocked"] != "all" {
+		t.Errorf("update details = %+v, want only lanes_blocked=all", repo.lastConfirm.Update)
+	}
+
+	_, err = svc.Confirm(context.Background(), created.ID, domainreport.NewConfirmationInput{
+		DeviceID: deviceB, Status: domainreport.StatusStillActive,
+		Update: domainreport.ConditionUpdate{Details: domainreport.Details{"lanes_blocked": "twelve"}},
+	})
+	assertCode(t, err, apperr.CodeValidation)
+}
+
+func TestServiceNearbyPassesSeverityAndFreshnessFilters(t *testing.T) {
+	svc, repo, _ := newTestService(t0)
+	since := t0.Add(-time.Hour)
+	if _, err := svc.Nearby(context.Background(), appreport.NearbyInput{
+		Latitude: 13.75, Longitude: 100.5, RadiusM: 3000,
+		Types:        []domainreport.Type{domainreport.TypeAccident, domainreport.TypeRoadDamage},
+		Severities:   []domainreport.Severity{domainreport.SeverityHigh},
+		UpdatedSince: &since,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	f := repo.lastNearby
+	if len(f.Types) != 2 || len(f.Severities) != 1 || f.UpdatedSince == nil || !f.UpdatedSince.Equal(since) || f.RadiusM != 3000 {
+		t.Errorf("nearby filter not passed through: %+v", f)
+	}
+}

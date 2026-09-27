@@ -72,6 +72,7 @@ func (s *Service) Create(ctx context.Context, in domainreport.NewReportInput) (*
 		WaterDepth:     in.WaterDepth,
 		WaterLevelCM:   in.WaterLevelCM,
 		Passability:    in.Passability,
+		Details:        in.Details,
 		Description:    in.Description,
 		ImageKey:       in.ImageKey,
 		PeopleCount:    in.PeopleCount,
@@ -216,7 +217,9 @@ type NearbyInput struct {
 	Latitude, Longitude float64
 	RadiusM             float64
 	Types               []domainreport.Type
+	Severities          []domainreport.Severity
 	Statuses            []domainreport.Status
+	UpdatedSince        *time.Time
 	Sort                ports.NearbySort
 	Limit               int
 }
@@ -254,14 +257,16 @@ func (s *Service) Nearby(ctx context.Context, in NearbyInput) ([]domainreport.Re
 		statuses = domainreport.DefaultVisibleStatuses
 	}
 	return s.repo.Nearby(ctx, ports.NearbyFilter{
-		Latitude:  in.Latitude,
-		Longitude: in.Longitude,
-		RadiusM:   radius,
-		Types:     in.Types,
-		Statuses:  statuses,
-		Sort:      sort,
-		Limit:     clampLimit(in.Limit, DefaultNearbyLimit, MaxNearbyLimit),
-		Now:       s.clock.Now(),
+		Latitude:     in.Latitude,
+		Longitude:    in.Longitude,
+		RadiusM:      radius,
+		Types:        in.Types,
+		Severities:   in.Severities,
+		Statuses:     statuses,
+		UpdatedSince: in.UpdatedSince,
+		Sort:         sort,
+		Limit:        clampLimit(in.Limit, DefaultNearbyLimit, MaxNearbyLimit),
+		Now:          s.clock.Now(),
 	})
 }
 
@@ -319,6 +324,9 @@ func (s *Service) Confirm(ctx context.Context, reportID uuid.UUID, in domainrepo
 	}
 	if existing == nil || existing.HiddenAt != nil {
 		return nil, apperr.NotFound("report not found")
+	}
+	if err := in.Update.ValidateFor(existing.Type); err != nil {
+		return nil, err
 	}
 	if in.Status == domainreport.StatusStillActive {
 		staleAt, expiresAt := s.policy.Window(existing.Type, now)

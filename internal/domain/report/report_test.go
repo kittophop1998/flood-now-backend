@@ -253,3 +253,60 @@ func TestConfirmationInputValidate(t *testing.T) {
 		}
 	})
 }
+
+func TestYearRoundCategories(t *testing.T) {
+	for _, ty := range []Type{TypeRoadDamage, TypeConstruction, TypeTrafficSignal} {
+		if !ty.Valid() || !ty.Creatable() {
+			t.Errorf("%s should be creatable", ty)
+		}
+	}
+	if !TypeRoadDamage.AffectsRoad() || !TypeConstruction.AffectsRoad() || TypeTrafficSignal.AffectsRoad() {
+		t.Error("road damage and construction take passability; a traffic signal doesn't")
+	}
+	p := testPolicy()
+	now := time.Date(2026, 9, 25, 8, 0, 0, 0, time.UTC)
+	for _, ty := range []Type{TypeRoadDamage, TypeConstruction} {
+		if stale, _ := p.Window(ty, now); !stale.Equal(now.Add(12 * time.Hour)) {
+			t.Errorf("%s should use the long-lived window, got stale at %v", ty, stale)
+		}
+		if ty.IsFacility() {
+			t.Errorf("%s is an incident, not a facility", ty)
+		}
+	}
+	if stale, _ := p.Window(TypeAccident, now); !stale.Equal(now.Add(2 * time.Hour)) {
+		t.Error("accidents keep the short window")
+	}
+}
+
+func TestDetailsValidationAndNormalization(t *testing.T) {
+	in := NewReportInput{Type: TypeAccident, Severity: SeverityModerate, Latitude: 13.75, Longitude: 100.5,
+		Details: Details{"lanes_blocked": "one", "traffic_impact": "slow"}}
+	if err := in.Validate(); err != nil {
+		t.Fatalf("valid accident details rejected: %v", err)
+	}
+
+	in.Details = Details{"lanes_blocked": "seven"}
+	if err := in.Validate(); err == nil {
+		t.Error("an unknown lane value must be rejected")
+	}
+
+	// Another category's details are dropped, not rejected (like water depth
+	// sent for a non-flood report).
+	in.Details = Details{"closure": "full", "water": "deep", "lanes_blocked": "all"}
+	if err := in.Validate(); err != nil {
+		t.Fatalf("foreign detail keys should not fail validation: %v", err)
+	}
+	if got := in.Normalized().Details; len(got) != 1 || got["lanes_blocked"] != "all" {
+		t.Errorf("normalized details = %v", got)
+	}
+
+	flood := NewReportInput{Type: TypeFlooded, Severity: SeverityHigh, Latitude: 13.75, Longitude: 100.5, Details: Details{"lanes_blocked": "all"}}
+	if flood.Normalized().Details != nil {
+		t.Error("a flood carries no accident fields")
+	}
+
+	closure := NewReportInput{Type: TypeRoadClosed, Severity: SeverityHigh, Latitude: 13.75, Longitude: 100.5, Details: Details{"closure": "sometimes"}}
+	if err := closure.Validate(); err == nil {
+		t.Error("an unknown closure value must be rejected")
+	}
+}

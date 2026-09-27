@@ -93,7 +93,7 @@ func (f *fakeFollows) UpdatePlace(ctx context.Context, fl *domainfollow.Follow) 
 	return nil
 }
 
-func (f *fakeFollows) PlaceSummaries(ctx context.Context, deviceID string, severe []domainreport.Severity, now time.Time) ([]domainfollow.PlaceWithSummary, error) {
+func (f *fakeFollows) PlaceSummaries(ctx context.Context, deviceID string, severe []domainreport.Severity, facilities []domainreport.Type, now time.Time) ([]domainfollow.PlaceWithSummary, error) {
 	var out []domainfollow.PlaceWithSummary
 	for _, fl := range f.follows {
 		if fl.Kind == domainfollow.KindPlace && fl.DeviceID == deviceID {

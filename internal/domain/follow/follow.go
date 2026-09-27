@@ -221,6 +221,18 @@ type AreaSummary struct {
 	ActiveCount    int
 	SevereCount    int
 	LatestUpdateAt *time.Time
+	// Top is the incident that matters most there (nil when none): the
+	// freshest, most severe, then nearest open report that isn't a facility
+	// (a shelter nearby is not "something happening").
+	Top *AreaIncident
+}
+
+// AreaIncident is a short description of one incident in a watch area.
+type AreaIncident struct {
+	ReportID  uuid.UUID
+	Type      report.Type
+	Severity  report.Severity
+	DistanceM float64
 }
 
 func (s AreaSummary) Level() AreaLevel {
@@ -252,11 +264,12 @@ func allowedRadius(r int) bool {
 type NotificationKind string
 
 const (
-	NotifySevereNearby NotificationKind = "severe_nearby" // new severe report inside a followed area
-	NotifyConfirmed    NotificationKind = "confirmed"     // followed report confirmed still active
-	NotifyUpdated      NotificationKind = "updated"       // followed report's condition (depth, severity, passability, photo) changed
-	NotifyResolved     NotificationKind = "resolved"      // followed report resolved
-	NotifyReopened     NotificationKind = "reopened"      // followed report reported active again
+	NotifySevereNearby NotificationKind = "severe_nearby"  // new severe report inside a followed area
+	NotifyClosure      NotificationKind = "closure_nearby" // new road closure (any severity) inside a followed area
+	NotifyConfirmed    NotificationKind = "confirmed"      // followed report confirmed still active
+	NotifyUpdated      NotificationKind = "updated"        // followed report's condition (depth, severity, passability, photo) changed
+	NotifyResolved     NotificationKind = "resolved"       // followed report resolved
+	NotifyReopened     NotificationKind = "reopened"       // followed report reported active again
 )
 
 type Notification struct {
@@ -267,19 +280,47 @@ type Notification struct {
 	Report    report.ReportWithStats
 }
 
+// AlertTypes are categories that notify a followed area at any severity: a
+// new road closure changes how people get around even when it isn't
+// dangerous. Everything else notifies an area only when severe, so routine
+// minor reports don't spam watchers.
+var AlertTypes = []report.Type{report.TypeRoadClosed}
+
+func isAlertType(t report.Type) bool {
+	for _, a := range AlertTypes {
+		if a == t {
+			return true
+		}
+	}
+	return false
+}
+
+// areaKind is what a new (or re-opened) report inside a watched area means.
+func areaKind(t report.Type, severity report.Severity) (NotificationKind, bool) {
+	switch {
+	case severity.IsSevere():
+		return NotifySevereNearby, true
+	case isAlertType(t):
+		return NotifyClosure, true
+	}
+	return "", false
+}
+
 // NotificationKindFor maps a report event seen through a follow to what the
-// user is notified about; ok is false when that follow doesn't care.
-func NotificationKindFor(followKind Kind, event report.EventKind, severity report.Severity) (NotificationKind, bool) {
+// user is notified about; ok is false when that follow doesn't care. Areas
+// react to every incident category (flood, accident, closure, outage…) —
+// what decides is severity, plus a new road closure at any severity.
+func NotificationKindFor(followKind Kind, event report.EventKind, t report.Type, severity report.Severity) (NotificationKind, bool) {
 	switch followKind {
 	case KindArea:
-		if event == report.EventCreated && severity.IsSevere() {
-			return NotifySevereNearby, true
+		if event == report.EventCreated {
+			return areaKind(t, severity)
 		}
 	case KindPlace:
-		// A watched place also hears about a severe incident becoming active
+		// A watched place also hears about an incident becoming active
 		// again; routine confirmations never notify an area, to avoid spam.
-		if (event == report.EventCreated || event == report.EventReopened) && severity.IsSevere() {
-			return NotifySevereNearby, true
+		if event == report.EventCreated || event == report.EventReopened {
+			return areaKind(t, severity)
 		}
 	case KindReport:
 		switch event {

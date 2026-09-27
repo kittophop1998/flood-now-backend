@@ -135,27 +135,41 @@ func (repo *FollowRepository) UpdatePlace(ctx context.Context, f *follow.Follow)
 }
 
 // PlaceSummaries counts the open, visible reports inside every saved place's
-// watch radius with one LATERAL query (bbox prefilter on the report
-// lat/lng index, then exact haversine), instead of one query per place.
-func (repo *FollowRepository) PlaceSummaries(ctx context.Context, deviceID string, severe []report.Severity, now time.Time) ([]follow.PlaceWithSummary, error) {
+// watch radius and picks each area's top incident with LATERAL queries
+// (bbox prefilter on the report lat/lng index, then exact haversine),
+// instead of queries per place.
+func (repo *FollowRepository) PlaceSummaries(ctx context.Context, deviceID string, severe []report.Severity, facilities []report.Type, now time.Time) ([]follow.PlaceWithSummary, error) {
 	var b queryBuilder
 	device := b.arg(deviceID)
 	nowPH := b.arg(now)
 	sevPH := b.arg(severityStrings(severe))
+	facPH := b.arg(typeStrings(facilities))
+	dist := distanceSQL("f.latitude", "f.longitude")
+	inArea := `r.hidden_at IS NULL AND r.resolved_at IS NULL AND r.expires_at > ` + nowPH + `
+				AND r.latitude BETWEEN f.latitude - f.radius_m / 111320.0 AND f.latitude + f.radius_m / 111320.0
+				AND r.longitude BETWEEN f.longitude - f.radius_m / (111320.0 * GREATEST(cos(radians(f.latitude)), 0.01))
+					AND f.longitude + f.radius_m / (111320.0 * GREATEST(cos(radians(f.latitude)), 0.01))
+				AND ` + dist + ` <= f.radius_m`
 	query := `
-		SELECT ` + followColumns + `, COALESCE(s.active_count, 0), COALESCE(s.severe_count, 0), s.latest
+		SELECT ` + followColumns + `, COALESCE(s.active_count, 0), COALESCE(s.severe_count, 0), s.latest,
+			top.id, top.type, top.severity, top.distance_m
 		FROM follows f
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*) AS active_count,
 				COUNT(*) FILTER (WHERE r.severity = ANY(` + sevPH + `)) AS severe_count,
 				MAX(r.updated_at) AS latest
 			FROM reports r
-			WHERE r.hidden_at IS NULL AND r.resolved_at IS NULL AND r.expires_at > ` + nowPH + `
-				AND r.latitude BETWEEN f.latitude - f.radius_m / 111320.0 AND f.latitude + f.radius_m / 111320.0
-				AND r.longitude BETWEEN f.longitude - f.radius_m / (111320.0 * GREATEST(cos(radians(f.latitude)), 0.01))
-					AND f.longitude + f.radius_m / (111320.0 * GREATEST(cos(radians(f.latitude)), 0.01))
-				AND ` + distanceSQL("f.latitude", "f.longitude") + ` <= f.radius_m
+			WHERE ` + inArea + `
 		) s ON true
+		LEFT JOIN LATERAL (
+			SELECT r.id, r.type, r.severity, ` + dist + ` AS distance_m
+			FROM reports r
+			WHERE ` + inArea + ` AND NOT (r.type = ANY(` + facPH + `))
+			ORDER BY (r.stale_at > ` + nowPH + `) DESC,
+				CASE r.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'moderate' THEN 2 ELSE 1 END DESC,
+				distance_m ASC
+			LIMIT 1
+		) top ON true
 		WHERE f.device_id = ` + device + ` AND f.kind = 'place'
 		ORDER BY f.created_at`
 	rows, err := repo.db.QueryContext(ctx, query, b.args...)
@@ -166,12 +180,24 @@ func (repo *FollowRepository) PlaceSummaries(ctx context.Context, deviceID strin
 
 	out := []follow.PlaceWithSummary{}
 	for rows.Next() {
-		var p follow.PlaceWithSummary
-		f, err := scanFollow(rows, &p.Summary.ActiveCount, &p.Summary.SevereCount, &p.Summary.LatestUpdateAt)
+		var (
+			p        follow.PlaceWithSummary
+			topID    *uuid.UUID
+			topType  sql.NullString
+			topSev   sql.NullString
+			topDistM sql.NullFloat64
+		)
+		f, err := scanFollow(rows, &p.Summary.ActiveCount, &p.Summary.SevereCount, &p.Summary.LatestUpdateAt,
+			&topID, &topType, &topSev, &topDistM)
 		if err != nil {
 			return nil, fmt.Errorf("scan saved place: %w", err)
 		}
 		p.Follow = *f
+		if topID != nil {
+			p.Summary.Top = &follow.AreaIncident{
+				ReportID: *topID, Type: report.Type(topType.String), Severity: report.Severity(topSev.String), DistanceM: topDistM.Float64,
+			}
+		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -180,7 +206,8 @@ func (repo *FollowRepository) PlaceSummaries(ctx context.Context, deviceID strin
 // Notifications matches report events against the device's follows:
 // report follows see every event of their report after the follow began;
 // area follows see "created" events inside their radius at the given
-// severities; saved places with notifications on also see "reopened".
+// severities or categories; saved places with notifications on also see
+// "reopened".
 // Events the device caused itself and hidden reports are skipped.
 func (repo *FollowRepository) Notifications(ctx context.Context, q ports.NotificationQuery) ([]ports.NotificationCandidate, error) {
 	var b queryBuilder
@@ -190,9 +217,18 @@ func (repo *FollowRepository) Notifications(ctx context.Context, q ports.Notific
 	for i, s := range q.AreaSeverities {
 		sevList[i] = b.arg(string(s))
 	}
-	sevIn := "FALSE"
+	// An area hears about a new report that is severe enough or of an
+	// always-notify category (see follow.AlertTypes).
+	var matches []string
 	if len(sevList) > 0 {
-		sevIn = "r.severity IN (" + strings.Join(sevList, ", ") + ")"
+		matches = append(matches, "r.severity IN ("+strings.Join(sevList, ", ")+")")
+	}
+	if len(q.AreaTypes) > 0 {
+		matches = append(matches, "r.type = ANY("+b.arg(typeStrings(q.AreaTypes))+")")
+	}
+	sevIn := "FALSE"
+	if len(matches) > 0 {
+		sevIn = "(" + strings.Join(matches, " OR ") + ")"
 	}
 
 	query := `

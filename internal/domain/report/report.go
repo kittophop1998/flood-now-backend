@@ -25,16 +25,21 @@ const (
 	TypeShelter        Type = "shelter"
 	TypeAidPoint       Type = "aid_point"
 	TypeOther          Type = "other"
+	TypeRoadDamage     Type = "road_damage"
+	TypeConstruction   Type = "construction"
+	TypeTrafficSignal  Type = "traffic_signal_issue"
 )
 
 // typeRules is the single table of per-category behavior: whether the
 // category describes road usability (so passability applies), whether it's
-// a long-lived facility (shelter/aid point use the longer freshness window),
+// long-lived (shelters, aid points, road damage and construction use the
+// longer freshness window), whether it's a facility rather than an incident,
 // how close a same-category report must be to count as a likely duplicate,
 // and whether it's a legacy category that stored reports may still carry but
 // new reports may not use (someone who needs help uses the SOS flow instead).
 var typeRules = map[Type]struct {
 	affectsRoad     bool
+	longLived       bool
 	facility        bool
 	duplicateRadius float64 // meters
 	legacy          bool
@@ -44,16 +49,20 @@ var typeRules = map[Type]struct {
 	TypeAccident:       {affectsRoad: true, duplicateRadius: 75},
 	TypeVehicleStalled: {affectsRoad: true, duplicateRadius: 50, legacy: true},
 	TypeObstruction:    {affectsRoad: true, duplicateRadius: 50},
+	TypeRoadDamage:     {affectsRoad: true, longLived: true, duplicateRadius: 50},
+	TypeConstruction:   {affectsRoad: true, longLived: true, duplicateRadius: 150},
+	TypeTrafficSignal:  {duplicateRadius: 75},
 	TypePowerOutage:    {duplicateRadius: 150},
 	TypeHelpNeeded:     {duplicateRadius: 50, legacy: true},
-	TypeShelter:        {facility: true, duplicateRadius: 100},
-	TypeAidPoint:       {facility: true, duplicateRadius: 100},
+	TypeShelter:        {longLived: true, facility: true, duplicateRadius: 100},
+	TypeAidPoint:       {longLived: true, facility: true, duplicateRadius: 100},
 	TypeOther:          {duplicateRadius: 50, legacy: true},
 }
 
 // creatableTypes are the categories a new report may use, in display order.
 var creatableTypes = []string{
 	string(TypeFlooded), string(TypeRoadClosed), string(TypeAccident), string(TypeObstruction),
+	string(TypeRoadDamage), string(TypeConstruction), string(TypeTrafficSignal),
 	string(TypePowerOutage), string(TypeShelter), string(TypeAidPoint),
 }
 
@@ -75,9 +84,24 @@ func (t Type) Creatable() bool {
 // AffectsRoad reports whether per-vehicle passability is meaningful for t.
 func (t Type) AffectsRoad() bool { return typeRules[t].affectsRoad }
 
-// IsFacility reports whether t is a long-lived place (shelter, aid point)
-// rather than a fast-changing road condition.
+// IsLongLived reports whether t changes slowly (shelters, aid points, road
+// damage, construction) and so uses the longer freshness window.
+func (t Type) IsLongLived() bool { return typeRules[t].longLived }
+
+// IsFacility reports whether t is a place people go to (shelter, aid point)
+// rather than an incident affecting travel or safety.
 func (t Type) IsFacility() bool { return typeRules[t].facility }
+
+// FacilityTypes lists every facility category (see IsFacility).
+func FacilityTypes() []Type {
+	var out []Type
+	for t, r := range typeRules {
+		if r.facility {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 // DuplicateRadiusMeters is how close an existing active report of the same
 // category must be for a new report to be flagged as a likely duplicate.
@@ -193,15 +217,18 @@ const (
 // Report is the core entity. Optional fields are pointers so "not provided"
 // is distinguishable from a zero value.
 type Report struct {
-	ID             uuid.UUID
-	Type           Type
-	Severity       Severity
-	Latitude       float64
-	Longitude      float64
-	GeometryType   GeometryType
-	WaterDepth     *WaterDepth
-	WaterLevelCM   *int
-	Passability    *Passability
+	ID           uuid.UUID
+	Type         Type
+	Severity     Severity
+	Latitude     float64
+	Longitude    float64
+	GeometryType GeometryType
+	WaterDepth   *WaterDepth
+	WaterLevelCM *int
+	Passability  *Passability
+	// Details holds the category-specific fields (see detailRules), e.g.
+	// lanes blocked by an accident. Nil when none were given.
+	Details        Details
 	Description    *string
 	ImageKey       *string
 	PeopleCount    *int
@@ -256,6 +283,7 @@ type NewReportInput struct {
 	WaterDepth   *WaterDepth
 	WaterLevelCM *int
 	Passability  *Passability
+	Details      Details
 	Description  *string
 	ImageKey     *string
 	PeopleCount  *int
@@ -300,6 +328,7 @@ func (in NewReportInput) Validate() error {
 		fields["water_level_cm"] = "must be >= 0"
 	}
 	validatePassability(in.Passability, fields)
+	validateDetails(in.Type, in.Details, fields)
 	if in.PeopleCount != nil && *in.PeopleCount < 0 {
 		fields["people_count"] = "must be >= 0"
 	}
@@ -358,5 +387,6 @@ func (in NewReportInput) Normalized() NewReportInput {
 	if !out.Type.AffectsRoad() {
 		out.Passability = nil
 	}
+	out.Details = in.Details.For(out.Type)
 	return out
 }

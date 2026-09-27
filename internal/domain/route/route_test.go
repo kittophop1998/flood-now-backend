@@ -73,6 +73,13 @@ func TestDistanceFromRouteDecidesRelevance(t *testing.T) {
 	}
 }
 
+func TestStaleClosureOnlyCautions(t *testing.T) {
+	closed := incident(report.TypeRoadClosed, 13.75, 100.51, func(r *report.Report) { r.StaleAt = now.Add(-time.Minute) })
+	if impact, reason := ImpactOf(closed.Report, VehicleSedan, now); impact != ImpactCaution || reason != ReasonStale {
+		t.Fatalf("got %s/%s", impact, reason)
+	}
+}
+
 func TestUnknownPassabilityRules(t *testing.T) {
 	cases := []struct {
 		name string
@@ -80,7 +87,21 @@ func TestUnknownPassabilityRules(t *testing.T) {
 		want Impact
 	}{
 		{"flood depth fallback: knee blocks a motorcycle", incident(report.TypeFlooded, 13.75, 100.51, func(r *report.Report) { r.WaterDepth = ptr(report.WaterDepthKnee) }), ImpactBlocked},
-		{"road closed without passability cautions", incident(report.TypeRoadClosed, 13.75, 100.51, nil), ImpactCaution},
+		{"road closed without passability blocks", incident(report.TypeRoadClosed, 13.75, 100.51, nil), ImpactBlocked},
+		{"partial closure cautions", incident(report.TypeRoadClosed, 13.75, 100.51, func(r *report.Report) { r.Details = report.Details{"closure": "partial"} }), ImpactCaution},
+		{"accident blocking all lanes blocks", incident(report.TypeAccident, 13.75, 100.51, func(r *report.Report) { r.Details = report.Details{"lanes_blocked": "all"} }), ImpactBlocked},
+		{"accident blocking one lane cautions", incident(report.TypeAccident, 13.75, 100.51, func(r *report.Report) { r.Details = report.Details{"lanes_blocked": "one"} }), ImpactCaution},
+		{"minor accident, no details, is info", incident(report.TypeAccident, 13.75, 100.51, nil), ImpactInfo},
+		{"construction cautions", incident(report.TypeConstruction, 13.75, 100.51, nil), ImpactCaution},
+		{"construction with no lane blocked is info", incident(report.TypeConstruction, 13.75, 100.51, func(r *report.Report) { r.Details = report.Details{"lanes_blocked": "none"} }), ImpactInfo},
+		{"moderate road damage cautions", incident(report.TypeRoadDamage, 13.75, 100.51, func(r *report.Report) { r.Severity = report.SeverityModerate }), ImpactCaution},
+		{"minor road damage is info", incident(report.TypeRoadDamage, 13.75, 100.51, func(r *report.Report) { r.Severity = report.SeverityLow }), ImpactInfo},
+		{"broken traffic signal cautions", incident(report.TypeTrafficSignal, 13.75, 100.51, nil), ImpactCaution},
+		{"severe obstruction without passability cautions", incident(report.TypeObstruction, 13.75, 100.51, func(r *report.Report) { r.Severity = report.SeverityHigh }), ImpactCaution},
+		{"obstruction reported impassable blocks", incident(report.TypeObstruction, 13.75, 100.51, func(r *report.Report) {
+			r.Passability = &report.Passability{Walk: report.PassImpassable, Motorcycle: report.PassImpassable, Sedan: report.PassImpassable, SUVPickup: report.PassImpassable}
+		}), ImpactBlocked},
+		{"reported passability beats the closure fallback", incident(report.TypeRoadClosed, 13.75, 100.51, func(r *report.Report) { r.Passability = pass(report.PassPassable) }), ImpactInfo},
 		{"severe accident without passability cautions", incident(report.TypeAccident, 13.75, 100.51, func(r *report.Report) { r.Severity = report.SeverityCritical }), ImpactCaution},
 		{"minor obstruction without passability is info", incident(report.TypeObstruction, 13.75, 100.51, nil), ImpactInfo},
 		{"power outage never affects risk", incident(report.TypePowerOutage, 13.75, 100.51, func(r *report.Report) { r.Severity = report.SeverityCritical }), ImpactInfo},

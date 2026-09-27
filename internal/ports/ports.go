@@ -62,7 +62,9 @@ type NearbyFilter struct {
 	Latitude, Longitude float64
 	RadiusM             float64
 	Types               []report.Type
+	Severities          []report.Severity
 	Statuses            []report.Status
+	UpdatedSince        *time.Time
 	Sort                NearbySort
 	Limit               int
 	Now                 time.Time
@@ -137,8 +139,10 @@ type NotificationQuery struct {
 	DeviceID string
 	Since    time.Time
 	Limit    int
-	// AreaSeverities limits area-follow matches to new reports this severe.
+	// AreaSeverities limits area-follow matches to new reports this severe…
 	AreaSeverities []report.Severity
+	// …or of these categories at any severity (a new road closure).
+	AreaTypes []report.Type
 }
 
 // NotificationCandidate is one (event, follow) match; the application layer
@@ -168,8 +172,9 @@ type FollowRepository interface {
 	GetPlace(ctx context.Context, deviceID string, id uuid.UUID) (*follow.Follow, error)
 	UpdatePlace(ctx context.Context, f *follow.Follow) error
 	// PlaceSummaries returns the device's saved places with the open, visible
-	// reports inside each watch radius counted in a single query.
-	PlaceSummaries(ctx context.Context, deviceID string, severe []report.Severity, now time.Time) ([]follow.PlaceWithSummary, error)
+	// reports inside each watch radius counted in a single query, plus each
+	// area's top incident (facility categories never count as one).
+	PlaceSummaries(ctx context.Context, deviceID string, severe []report.Severity, facilities []report.Type, now time.Time) ([]follow.PlaceWithSummary, error)
 }
 
 // RouteProvider asks an external routing engine for candidate routes. The

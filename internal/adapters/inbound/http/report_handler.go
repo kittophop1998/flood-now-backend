@@ -65,6 +65,7 @@ func (p *ReportPresenter) one(r domainreport.ReportWithStats) reportResponse {
 		WaterDepth:       waterDepth,
 		WaterLevelCM:     r.WaterLevelCM,
 		Passability:      pass,
+		Details:          r.Details,
 		Description:      r.Description,
 		ImageKey:         r.ImageKey,
 		ImageURL:         imageURL,
@@ -304,13 +305,15 @@ func (h *ReportHandler) Aggregate(c *gin.Context) {
 func (h *ReportHandler) Nearby(c *gin.Context) {
 	p := newQueryParser(c)
 	in := appreport.NearbyInput{
-		Latitude:  p.float("lat", true),
-		Longitude: p.float("lng", true),
-		RadiusM:   p.float("radius_m", false),
-		Types:     p.types(),
-		Statuses:  p.statuses(),
-		Sort:      ports.NearbySort(p.q.Get("sort")),
-		Limit:     p.int("limit"),
+		Latitude:     p.float("lat", true),
+		Longitude:    p.float("lng", true),
+		RadiusM:      p.float("radius_m", false),
+		Types:        p.types(),
+		Severities:   p.severities(),
+		Statuses:     p.statuses(),
+		UpdatedSince: p.time("updated_since"),
+		Sort:         ports.NearbySort(p.q.Get("sort")),
+		Limit:        p.int("limit"),
 	}
 	if err := p.err("nearby query is invalid"); err != nil {
 		writeError(c, err)

@@ -116,7 +116,7 @@ func (s *Service) Places(ctx context.Context, deviceID string) ([]domainfollow.P
 	if err := domainfollow.ValidateDeviceID(deviceID); err != nil {
 		return nil, err
 	}
-	return s.follows.PlaceSummaries(ctx, deviceID, domainreport.SevereSeverities(), s.clock.Now())
+	return s.follows.PlaceSummaries(ctx, deviceID, domainreport.SevereSeverities(), domainreport.FacilityTypes(), s.clock.Now())
 }
 
 // place returns one of the device's saved places with its summary.
@@ -217,6 +217,7 @@ func (s *Service) Notifications(ctx context.Context, deviceID string, since *tim
 		Since:          from,
 		Limit:          defaultNotificationLimit,
 		AreaSeverities: domainreport.SevereSeverities(),
+		AreaTypes:      domainfollow.AlertTypes,
 	})
 	if err != nil {
 		return nil, err
@@ -225,7 +226,7 @@ func (s *Service) Notifications(ctx context.Context, deviceID string, since *tim
 	out := make([]domainfollow.Notification, 0, len(candidates))
 	seen := map[int64]bool{} // an event can match several follows; notify once
 	for _, c := range candidates {
-		kind, ok := domainfollow.NotificationKindFor(c.FollowKind, c.EventKind, c.Report.Severity)
+		kind, ok := domainfollow.NotificationKindFor(c.FollowKind, c.EventKind, c.Report.Type, c.Report.Severity)
 		if !ok || seen[c.EventID] {
 			continue
 		}

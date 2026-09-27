@@ -56,25 +56,45 @@ func TestNotificationKindFor(t *testing.T) {
 		{KindReport, report.EventCreated, report.SeverityCritical, "", false},
 	}
 	for _, c := range cases {
-		got, ok := NotificationKindFor(c.follow, c.event, c.severity)
+		got, ok := NotificationKindFor(c.follow, c.event, report.TypeFlooded, c.severity)
 		if got != c.want || ok != c.ok {
 			t.Errorf("%s/%s/%s = (%q, %v), want (%q, %v)", c.follow, c.event, c.severity, got, ok, c.want, c.ok)
 		}
 	}
 }
 
-func TestPlaceNotificationsAreSevereOnlyAndIncludeReopened(t *testing.T) {
-	if k, ok := NotificationKindFor(KindPlace, report.EventCreated, report.SeverityCritical); !ok || k != NotifySevereNearby {
+func TestPlaceNotificationsNeedSeverityAndIncludeReopened(t *testing.T) {
+	if k, ok := NotificationKindFor(KindPlace, report.EventCreated, report.TypeAccident, report.SeverityCritical); !ok || k != NotifySevereNearby {
 		t.Error("a new critical report in a watched place notifies")
 	}
-	if k, ok := NotificationKindFor(KindPlace, report.EventReopened, report.SeverityHigh); !ok || k != NotifySevereNearby {
+	if k, ok := NotificationKindFor(KindPlace, report.EventReopened, report.TypeAccident, report.SeverityHigh); !ok || k != NotifySevereNearby {
 		t.Error("a severe report happening again in a watched place notifies")
 	}
-	if _, ok := NotificationKindFor(KindPlace, report.EventCreated, report.SeverityModerate); ok {
+	if _, ok := NotificationKindFor(KindPlace, report.EventCreated, report.TypeAccident, report.SeverityModerate); ok {
 		t.Error("non-severe reports never notify a watched place")
 	}
-	if _, ok := NotificationKindFor(KindPlace, report.EventConfirmed, report.SeverityCritical); ok {
+	if _, ok := NotificationKindFor(KindPlace, report.EventConfirmed, report.TypeAccident, report.SeverityCritical); ok {
 		t.Error("confirmations never notify a watched place (anti-spam)")
+	}
+}
+
+func TestAreasReactToEveryCategoryAndNewClosures(t *testing.T) {
+	for _, typ := range []report.Type{report.TypeAccident, report.TypeObstruction, report.TypeRoadDamage, report.TypePowerOutage, report.TypeConstruction} {
+		if k, ok := NotificationKindFor(KindArea, report.EventCreated, typ, report.SeverityHigh); !ok || k != NotifySevereNearby {
+			t.Errorf("a new severe %s in a followed area notifies", typ)
+		}
+		if _, ok := NotificationKindFor(KindArea, report.EventCreated, typ, report.SeverityLow); ok {
+			t.Errorf("a minor %s never notifies an area", typ)
+		}
+	}
+	if k, ok := NotificationKindFor(KindArea, report.EventCreated, report.TypeRoadClosed, report.SeverityLow); !ok || k != NotifyClosure {
+		t.Error("a new road closure notifies an area at any severity")
+	}
+	if k, ok := NotificationKindFor(KindPlace, report.EventReopened, report.TypeRoadClosed, report.SeverityModerate); !ok || k != NotifyClosure {
+		t.Error("a road closure happening again notifies a watched place")
+	}
+	if k, ok := NotificationKindFor(KindArea, report.EventCreated, report.TypeRoadClosed, report.SeverityCritical); !ok || k != NotifySevereNearby {
+		t.Error("a severe closure is reported as severe")
 	}
 }
 

@@ -24,12 +24,15 @@ const (
 	TypeWaterRelease Type = "water_release"
 	TypeWeather      Type = "weather"
 	TypeShelterInfo  Type = "shelter_info"
+	TypeConstruction Type = "construction"
+	TypeSafetyNotice Type = "safety_notice" // local safety / emergency notice
 	TypeGeneral      Type = "general"
 )
 
 func (t Type) Valid() bool {
 	switch t {
-	case TypeFloodWarning, TypeEvacuation, TypeRoadClosure, TypeWaterRelease, TypeWeather, TypeShelterInfo, TypeGeneral:
+	case TypeFloodWarning, TypeEvacuation, TypeRoadClosure, TypeWaterRelease, TypeWeather, TypeShelterInfo,
+		TypeConstruction, TypeSafetyNotice, TypeGeneral:
 		return true
 	}
 	return false
@@ -115,7 +118,7 @@ func (f Fields) Validate(requireAll bool) error {
 	check("source_name", f.SourceName, 200)
 	if f.Type != nil {
 		if !f.Type.Valid() {
-			fields["type"] = "must be one of flood_warning, evacuation, road_closure, water_release, weather, shelter_info, general"
+			fields["type"] = "must be one of flood_warning, evacuation, road_closure, water_release, weather, shelter_info, construction, safety_notice, general"
 		}
 	} else if requireAll {
 		fields["type"] = "is required"

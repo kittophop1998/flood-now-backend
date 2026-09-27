@@ -1,8 +1,10 @@
 // Package route holds the deterministic route-risk rules: given candidate
 // routes from an external routing provider and the open community reports
-// near them, how risky is each route for one vehicle class. No routing
-// engine lives here and nothing is predicted — every outcome follows from a
-// report's passability, severity, freshness and distance from the route.
+// near them (floods, closures, accidents, obstructions, road damage,
+// construction, broken traffic signals…), how risky is each route for one
+// vehicle class. No routing engine lives here and nothing is predicted —
+// every outcome follows from a report's category, details, passability,
+// severity, freshness and distance from the route.
 package route
 
 import (
@@ -50,7 +52,7 @@ func (v Vehicle) Profile() Profile {
 }
 
 // Risk is a route's overall verdict. "safe" only ever means "no open
-// community report affects this route" — never a guarantee.
+// community report says something obstructs this route" — never a guarantee.
 type Risk string
 
 const (
@@ -86,14 +88,20 @@ func (i Impact) risk() Risk {
 type Reason string
 
 const (
-	ReasonImpassable     Reason = "impassable_for_vehicle"
-	ReasonNotRecommended Reason = "not_recommended_for_vehicle"
-	ReasonCaution        Reason = "caution_for_vehicle"
-	ReasonStale          Reason = "possibly_outdated"     // a blocking report nobody re-confirmed
-	ReasonSevereUnknown  Reason = "severe_unknown_access" // severe road incident, passability unknown
-	ReasonRoadClosed     Reason = "road_closed"
-	ReasonPassable       Reason = "passable_for_vehicle"
-	ReasonNearby         Reason = "nearby_incident" // not a road condition (e.g. power outage)
+	ReasonImpassable      Reason = "impassable_for_vehicle"
+	ReasonNotRecommended  Reason = "not_recommended_for_vehicle"
+	ReasonCaution         Reason = "caution_for_vehicle"
+	ReasonStale           Reason = "possibly_outdated"     // a blocking report nobody re-confirmed
+	ReasonSevereUnknown   Reason = "severe_unknown_access" // severe road incident, passability unknown
+	ReasonRoadClosed      Reason = "road_closed"
+	ReasonPartialClosure  Reason = "partial_closure"
+	ReasonAllLanesBlocked Reason = "all_lanes_blocked"
+	ReasonLanesBlocked    Reason = "lanes_blocked"
+	ReasonConstruction    Reason = "construction"
+	ReasonRoadDamage      Reason = "road_damage"
+	ReasonTrafficSignal   Reason = "traffic_signal_issue"
+	ReasonPassable        Reason = "passable_for_vehicle"
+	ReasonNearby          Reason = "nearby_incident" // not a road condition (e.g. power outage)
 )
 
 // Point is a WGS84 coordinate.
@@ -216,25 +224,42 @@ func PassLevelFor(r report.Report, v Vehicle) report.PassLevel {
 	return report.PassUnknown
 }
 
-// ImpactOf classifies one open report for a vehicle. The table:
+// ImpactOf classifies one open report for a vehicle. The reporter's own
+// per-vehicle passability wins; without one, the category and its details
+// decide. The table:
 //
-//	non-road category (power outage, help, shelter…) → info
-//	impassable        → blocked (caution if the report is possibly stale)
-//	not_recommended   → caution
-//	caution           → caution
-//	passable          → info
-//	unknown           → caution for road_closed or high/critical severity, else info
+//	traffic signal issue                    → caution
+//	other non-road category (power outage,
+//	  shelter, aid point, legacy help…)     → info
+//	impassable                              → blocked
+//	not_recommended / caution               → caution
+//	passable                                → info
+//	unknown passability:
+//	  road closed (full or unspecified)     → blocked; partial closure → caution
+//	  accident/construction, all lanes      → blocked; some lanes → caution
+//	  construction otherwise                → caution (info if no lane blocked)
+//	  road damage, moderate or worse        → caution
+//	  otherwise high/critical severity      → caution, else info
+//
+// Anything "blocked" by a possibly-stale report is only a caution: nobody has
+// re-confirmed it, so the route isn't declared impassable on old news.
 func ImpactOf(r report.Report, v Vehicle, now time.Time) (Impact, Reason) {
-	if !r.Type.AffectsRoad() {
-		return ImpactInfo, ReasonNearby
-	}
 	stale := r.Status(now) == report.StatusPossiblyStale
-	switch PassLevelFor(r, v) {
-	case report.PassImpassable:
+	block := func(reason Reason) (Impact, Reason) {
 		if stale {
 			return ImpactCaution, ReasonStale
 		}
-		return ImpactBlocked, ReasonImpassable
+		return ImpactBlocked, reason
+	}
+	if r.Type == report.TypeTrafficSignal {
+		return ImpactCaution, ReasonTrafficSignal
+	}
+	if !r.Type.AffectsRoad() {
+		return ImpactInfo, ReasonNearby
+	}
+	switch PassLevelFor(r, v) {
+	case report.PassImpassable:
+		return block(ReasonImpassable)
 	case report.PassNotRecommended:
 		return ImpactCaution, ReasonNotRecommended
 	case report.PassCaution:
@@ -242,8 +267,26 @@ func ImpactOf(r report.Report, v Vehicle, now time.Time) (Impact, Reason) {
 	case report.PassPassable:
 		return ImpactInfo, ReasonPassable
 	}
-	if r.Type == report.TypeRoadClosed {
-		return ImpactCaution, ReasonRoadClosed
+	lanes := r.Details.Get(report.DetailLanesBlocked)
+	switch r.Type {
+	case report.TypeRoadClosed:
+		if r.Details.Get(report.DetailClosure) == report.ClosurePartial {
+			return ImpactCaution, ReasonPartialClosure
+		}
+		return block(ReasonRoadClosed)
+	case report.TypeAccident, report.TypeConstruction:
+		switch {
+		case lanes == report.LanesAll:
+			return block(ReasonAllLanesBlocked)
+		case lanes != "" && lanes != "none":
+			return ImpactCaution, ReasonLanesBlocked
+		case r.Type == report.TypeConstruction && lanes == "":
+			return ImpactCaution, ReasonConstruction
+		}
+	case report.TypeRoadDamage:
+		if r.Severity.Rank() >= report.SeverityModerate.Rank() {
+			return ImpactCaution, ReasonRoadDamage
+		}
 	}
 	if r.Severity.IsSevere() {
 		return ImpactCaution, ReasonSevereUnknown

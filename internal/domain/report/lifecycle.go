@@ -48,11 +48,13 @@ func (r Report) Status(now time.Time) Status {
 }
 
 // FreshnessPolicy is the single, configurable source of lifecycle timing.
-// Road/flood conditions change fast; facilities (shelters, aid points) are
-// expected to stay put much longer, so they get their own window.
+// Road/flood conditions change fast; long-lived categories (shelters, aid
+// points, road damage, construction) are expected to stay put much longer,
+// so they get their own window.
 type FreshnessPolicy struct {
-	StaleAfter         time.Duration // no confirmation for this long → possibly_stale
-	TTL                time.Duration // no confirmation for this long → expired
+	StaleAfter time.Duration // no confirmation for this long → possibly_stale
+	TTL        time.Duration // no confirmation for this long → expired
+	// Long-lived categories (see Type.IsLongLived).
 	FacilityStaleAfter time.Duration
 	FacilityTTL        time.Duration
 	// ResolveThreshold is how many "cleared" votes are needed (and they must
@@ -77,7 +79,7 @@ func (p FreshnessPolicy) Validate() error {
 // Window returns when a report of type t, verified at verifiedAt, becomes
 // possibly stale and when it expires.
 func (p FreshnessPolicy) Window(t Type, verifiedAt time.Time) (staleAt, expiresAt time.Time) {
-	if t.IsFacility() {
+	if t.IsLongLived() {
 		return verifiedAt.Add(p.FacilityStaleAfter), verifiedAt.Add(p.FacilityTTL)
 	}
 	return verifiedAt.Add(p.StaleAfter), verifiedAt.Add(p.TTL)

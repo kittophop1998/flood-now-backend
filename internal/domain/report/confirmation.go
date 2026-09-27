@@ -35,18 +35,20 @@ type Confirmation struct {
 // ConditionUpdate is what a device says the situation looks like now, sent
 // with a still_active confirmation. Nil fields are left as they are; the
 // provided ones replace the report's current values (anyone on the spot can
-// correct the depth, severity, passability or photo — the report shows the
-// latest known condition, not the original reporter's).
+// correct the depth, severity, passability, category details or photo — the
+// report shows the latest known condition, not the original reporter's).
+// Details are merged key by key: sending one detail keeps the others.
 type ConditionUpdate struct {
 	Severity    *Severity
 	WaterDepth  *WaterDepth
 	Passability *Passability
+	Details     Details
 	ImageKey    *string
 }
 
 // Empty reports whether the update changes nothing.
 func (u ConditionUpdate) Empty() bool {
-	return u.Severity == nil && u.WaterDepth == nil && u.Passability == nil && u.ImageKey == nil
+	return u.Severity == nil && u.WaterDepth == nil && u.Passability == nil && len(u.Details) == 0 && u.ImageKey == nil
 }
 
 // For drops fields that don't apply to a report of type t, like
@@ -58,10 +60,13 @@ func (u ConditionUpdate) For(t Type) ConditionUpdate {
 	if !t.AffectsRoad() {
 		u.Passability = nil
 	}
+	u.Details = u.Details.For(t)
 	return u
 }
 
 // NewConfirmationInput is caller-provided input for confirming a report.
+// Details are validated against the report's category by the application
+// layer (ValidateFor), since the category isn't known from the request.
 type NewConfirmationInput struct {
 	DeviceID string
 	Status   ConfirmationStatus
@@ -91,6 +96,16 @@ func (in NewConfirmationInput) Validate() error {
 		fields["image_key"] = "must be a plain object key returned by /uploads/presign"
 	}
 
+	if len(fields) > 0 {
+		return apperr.Validation("confirmation is invalid", fields)
+	}
+	return nil
+}
+
+// ValidateFor checks the update's details against the report's category t.
+func (u ConditionUpdate) ValidateFor(t Type) error {
+	fields := map[string]string{}
+	validateDetails(t, u.Details, fields)
 	if len(fields) > 0 {
 		return apperr.Validation("confirmation is invalid", fields)
 	}

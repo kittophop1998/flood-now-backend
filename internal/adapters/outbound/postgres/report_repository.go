@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -30,7 +31,7 @@ func NewReportRepository(db *sql.DB) *ReportRepository {
 // same column list composes with distance ordering and LIMIT.
 const reportColumns = `
 	r.id, r.type, r.severity, r.latitude, r.longitude, r.geometry_type,
-	r.water_depth, r.water_level_cm, r.pass_walk, r.pass_motorcycle, r.pass_sedan, r.pass_suv_pickup,
+	r.water_depth, r.water_level_cm, r.pass_walk, r.pass_motorcycle, r.pass_sedan, r.pass_suv_pickup, r.details,
 	r.description, r.image_key, r.people_count, r.has_child, r.has_elderly, r.contact_phone,
 	r.created_at, r.updated_at, r.last_verified_at, r.stale_at, r.expires_at, r.resolved_at,
 	r.client_id, r.hidden_at, r.hidden_reason,
@@ -45,10 +46,11 @@ func scanReport(row rowScanner, extra ...any) (*report.ReportWithStats, error) {
 		r                      report.ReportWithStats
 		waterDepth             sql.NullString
 		walk, moto, sedan, suv sql.NullString
+		details                []byte
 	)
 	dest := []any{
 		&r.ID, &r.Type, &r.Severity, &r.Latitude, &r.Longitude, &r.GeometryType,
-		&waterDepth, &r.WaterLevelCM, &walk, &moto, &sedan, &suv,
+		&waterDepth, &r.WaterLevelCM, &walk, &moto, &sedan, &suv, &details,
 		&r.Description, &r.ImageKey, &r.PeopleCount, &r.HasChild, &r.HasElderly, &r.ContactPhone,
 		&r.CreatedAt, &r.UpdatedAt, &r.LastVerifiedAt, &r.StaleAt, &r.ExpiresAt, &r.ResolvedAt,
 		&r.ClientID, &r.HiddenAt, &r.HiddenReason,
@@ -60,6 +62,14 @@ func scanReport(row rowScanner, extra ...any) (*report.ReportWithStats, error) {
 	if waterDepth.Valid {
 		d := report.WaterDepth(waterDepth.String)
 		r.WaterDepth = &d
+	}
+	if len(details) > 0 {
+		if err := json.Unmarshal(details, &r.Details); err != nil {
+			return nil, fmt.Errorf("decode report details: %w", err)
+		}
+		if len(r.Details) == 0 {
+			r.Details = nil
+		}
 	}
 	if walk.Valid || moto.Valid || sedan.Valid || suv.Valid {
 		r.Passability = &report.Passability{
@@ -77,6 +87,18 @@ func passLevel(v sql.NullString) report.PassLevel {
 		return report.PassUnknown
 	}
 	return report.PassLevel(v.String)
+}
+
+// detailsColumn encodes details for the jsonb column (NULL when empty).
+func detailsColumn(d report.Details) (any, error) {
+	if len(d) == 0 {
+		return nil, nil
+	}
+	b, err := json.Marshal(d)
+	if err != nil {
+		return nil, fmt.Errorf("encode report details: %w", err)
+	}
+	return string(b), nil
 }
 
 func passColumns(p *report.Passability) [4]any {
@@ -98,17 +120,21 @@ func (repo *ReportRepository) Create(ctx context.Context, r *report.Report) erro
 		waterDepth = string(*r.WaterDepth)
 	}
 	pass := passColumns(r.Passability)
+	details, err := detailsColumn(r.Details)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO reports (
 			id, type, severity, latitude, longitude, geometry_type,
 			water_depth, water_level_cm, pass_walk, pass_motorcycle, pass_sedan, pass_suv_pickup,
 			description, image_key, people_count, has_child, has_elderly, contact_phone,
-			created_at, updated_at, last_verified_at, stale_at, expires_at, client_id
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+			created_at, updated_at, last_verified_at, stale_at, expires_at, client_id, details
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb)`,
 		r.ID, r.Type, r.Severity, r.Latitude, r.Longitude, r.GeometryType,
 		waterDepth, r.WaterLevelCM, pass[0], pass[1], pass[2], pass[3],
 		r.Description, r.ImageKey, r.PeopleCount, r.HasChild, r.HasElderly, r.ContactPhone,
-		r.CreatedAt, r.UpdatedAt, r.LastVerifiedAt, r.StaleAt, r.ExpiresAt, r.ClientID,
+		r.CreatedAt, r.UpdatedAt, r.LastVerifiedAt, r.StaleAt, r.ExpiresAt, r.ClientID, details,
 	); err != nil {
 		if isUniqueViolation(err) {
 			return apperr.Conflict("a report with this client_id already exists")
@@ -335,6 +361,10 @@ func (repo *ReportRepository) Nearby(ctx context.Context, filter ports.NearbyFil
 	b.add("r.latitude BETWEEN " + b.arg(filter.Latitude-dLat) + " AND " + b.arg(filter.Latitude+dLat))
 	b.add("r.longitude BETWEEN " + b.arg(filter.Longitude-dLng) + " AND " + b.arg(filter.Longitude+dLng))
 	b.inList("r.type", typeStrings(filter.Types))
+	b.inList("r.severity", severityStrings(filter.Severities))
+	if filter.UpdatedSince != nil {
+		b.add("r.updated_at >= " + b.arg(*filter.UpdatedSince))
+	}
 
 	dist := distanceSQL(b.arg(filter.Latitude), b.arg(filter.Longitude))
 	b.add(dist + " <= " + b.arg(filter.RadiusM))
@@ -505,8 +535,9 @@ func (repo *ReportRepository) Confirm(ctx context.Context, params ports.ConfirmP
 }
 
 // applyConditionUpdate overwrites the report's condition with the update's
-// non-nil fields (COALESCE keeps the rest). A new water_depth also clears the
-// legacy exact water_level_cm, which would otherwise contradict it.
+// non-nil fields (COALESCE keeps the rest). Details merge key by key. A new
+// water_depth also clears the legacy exact water_level_cm, which would
+// otherwise contradict it.
 func applyConditionUpdate(ctx context.Context, tx *sql.Tx, reportID uuid.UUID, u report.ConditionUpdate) error {
 	var severity, waterDepth any
 	if u.Severity != nil {
@@ -516,6 +547,10 @@ func applyConditionUpdate(ctx context.Context, tx *sql.Tx, reportID uuid.UUID, u
 		waterDepth = string(*u.WaterDepth)
 	}
 	pass := passColumns(u.Passability)
+	details, err := detailsColumn(u.Details)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE reports SET
 			severity = COALESCE($1, severity),
@@ -525,9 +560,10 @@ func applyConditionUpdate(ctx context.Context, tx *sql.Tx, reportID uuid.UUID, u
 			pass_motorcycle = COALESCE($4, pass_motorcycle),
 			pass_sedan = COALESCE($5, pass_sedan),
 			pass_suv_pickup = COALESCE($6, pass_suv_pickup),
-			image_key = COALESCE($7, image_key)
+			image_key = COALESCE($7, image_key),
+			details = CASE WHEN $9::jsonb IS NULL THEN details ELSE COALESCE(details, '{}'::jsonb) || $9::jsonb END
 		WHERE id = $8`,
-		severity, waterDepth, pass[0], pass[1], pass[2], pass[3], u.ImageKey, reportID,
+		severity, waterDepth, pass[0], pass[1], pass[2], pass[3], u.ImageKey, reportID, details,
 	); err != nil {
 		return fmt.Errorf("update report condition: %w", err)
 	}

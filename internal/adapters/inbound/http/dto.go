@@ -26,33 +26,34 @@ type passabilityDTO struct {
 }
 
 type reportResponse struct {
-	ID               string          `json:"id"`
-	Type             string          `json:"type"`
-	Severity         string          `json:"severity"`
-	Status           string          `json:"status"`
-	Latitude         float64         `json:"latitude"`
-	Longitude        float64         `json:"longitude"`
-	GeometryType     string          `json:"geometry_type"`
-	WaterDepth       *string         `json:"water_depth"`
-	WaterLevelCM     *int            `json:"water_level_cm"`
-	Passability      *passabilityDTO `json:"passability"`
-	Description      *string         `json:"description"`
-	ImageKey         *string         `json:"image_key"`
-	ImageURL         *string         `json:"image_url"`
-	PeopleCount      *int            `json:"people_count"`
-	HasChild         *bool           `json:"has_child"`
-	HasElderly       *bool           `json:"has_elderly"`
-	ContactPhone     *string         `json:"contact_phone"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
-	LastVerifiedAt   time.Time       `json:"last_verified_at"`
-	StaleAt          time.Time       `json:"stale_at"`
-	ExpiresAt        time.Time       `json:"expires_at"`
-	ResolvedAt       *time.Time      `json:"resolved_at"`
-	IsExpired        bool            `json:"is_expired"`
-	StillActiveCount int             `json:"still_active_count"`
-	ClearedCount     int             `json:"cleared_count"`
-	DistanceM        *float64        `json:"distance_m,omitempty"`
+	ID               string            `json:"id"`
+	Type             string            `json:"type"`
+	Severity         string            `json:"severity"`
+	Status           string            `json:"status"`
+	Latitude         float64           `json:"latitude"`
+	Longitude        float64           `json:"longitude"`
+	GeometryType     string            `json:"geometry_type"`
+	WaterDepth       *string           `json:"water_depth"`
+	WaterLevelCM     *int              `json:"water_level_cm"`
+	Passability      *passabilityDTO   `json:"passability"`
+	Details          map[string]string `json:"details"`
+	Description      *string           `json:"description"`
+	ImageKey         *string           `json:"image_key"`
+	ImageURL         *string           `json:"image_url"`
+	PeopleCount      *int              `json:"people_count"`
+	HasChild         *bool             `json:"has_child"`
+	HasElderly       *bool             `json:"has_elderly"`
+	ContactPhone     *string           `json:"contact_phone"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+	LastVerifiedAt   time.Time         `json:"last_verified_at"`
+	StaleAt          time.Time         `json:"stale_at"`
+	ExpiresAt        time.Time         `json:"expires_at"`
+	ResolvedAt       *time.Time        `json:"resolved_at"`
+	IsExpired        bool              `json:"is_expired"`
+	StillActiveCount int               `json:"still_active_count"`
+	ClearedCount     int               `json:"cleared_count"`
+	DistanceM        *float64          `json:"distance_m,omitempty"`
 }
 
 type listReportsResponse struct {
@@ -65,21 +66,22 @@ type reportsResponse struct {
 }
 
 type createReportRequest struct {
-	Type         string          `json:"type"`
-	Severity     string          `json:"severity"`
-	Latitude     float64         `json:"latitude"`
-	Longitude    float64         `json:"longitude"`
-	GeometryType string          `json:"geometry_type"`
-	WaterDepth   *string         `json:"water_depth"`
-	WaterLevelCM *int            `json:"water_level_cm"`
-	Passability  *passabilityDTO `json:"passability"`
-	Description  *string         `json:"description"`
-	ImageKey     *string         `json:"image_key"`
-	PeopleCount  *int            `json:"people_count"`
-	HasChild     *bool           `json:"has_child"`
-	HasElderly   *bool           `json:"has_elderly"`
-	ContactPhone *string         `json:"contact_phone"`
-	ClientID     *string         `json:"client_id"`
+	Type         string            `json:"type"`
+	Severity     string            `json:"severity"`
+	Latitude     float64           `json:"latitude"`
+	Longitude    float64           `json:"longitude"`
+	GeometryType string            `json:"geometry_type"`
+	WaterDepth   *string           `json:"water_depth"`
+	WaterLevelCM *int              `json:"water_level_cm"`
+	Passability  *passabilityDTO   `json:"passability"`
+	Details      map[string]string `json:"details"`
+	Description  *string           `json:"description"`
+	ImageKey     *string           `json:"image_key"`
+	PeopleCount  *int              `json:"people_count"`
+	HasChild     *bool             `json:"has_child"`
+	HasElderly   *bool             `json:"has_elderly"`
+	ContactPhone *string           `json:"contact_phone"`
+	ClientID     *string           `json:"client_id"`
 }
 
 func (req createReportRequest) toDomain() domainreport.NewReportInput {
@@ -90,6 +92,7 @@ func (req createReportRequest) toDomain() domainreport.NewReportInput {
 		Longitude:    req.Longitude,
 		GeometryType: domainreport.GeometryType(req.GeometryType),
 		WaterLevelCM: req.WaterLevelCM,
+		Details:      domainreport.Details(req.Details),
 		Description:  req.Description,
 		ImageKey:     req.ImageKey,
 		PeopleCount:  req.PeopleCount,
@@ -130,10 +133,11 @@ type confirmReportRequest struct {
 	DeviceID string `json:"device_id"`
 	Status   string `json:"status"`
 	// Optional condition update (still_active only).
-	Severity    *string         `json:"severity"`
-	WaterDepth  *string         `json:"water_depth"`
-	Passability *passabilityDTO `json:"passability"`
-	ImageKey    *string         `json:"image_key"`
+	Severity    *string           `json:"severity"`
+	WaterDepth  *string           `json:"water_depth"`
+	Passability *passabilityDTO   `json:"passability"`
+	Details     map[string]string `json:"details"`
+	ImageKey    *string           `json:"image_key"`
 }
 
 func (req confirmReportRequest) toDomain() domainreport.NewConfirmationInput {
@@ -142,6 +146,7 @@ func (req confirmReportRequest) toDomain() domainreport.NewConfirmationInput {
 		Status:   domainreport.ConfirmationStatus(req.Status),
 	}
 	in.Update.ImageKey = req.ImageKey
+	in.Update.Details = domainreport.Details(req.Details)
 	if req.Severity != nil {
 		s := domainreport.Severity(*req.Severity)
 		in.Update.Severity = &s
@@ -262,10 +267,18 @@ type aggregateResponse struct {
 // --- Saved places ---
 
 type areaSummaryResponse struct {
-	Level          string     `json:"level"`
-	ActiveCount    int        `json:"active_count"`
-	SevereCount    int        `json:"severe_count"`
-	LatestUpdateAt *time.Time `json:"latest_update_at"`
+	Level          string                `json:"level"`
+	ActiveCount    int                   `json:"active_count"`
+	SevereCount    int                   `json:"severe_count"`
+	LatestUpdateAt *time.Time            `json:"latest_update_at"`
+	Top            *areaIncidentResponse `json:"top"`
+}
+
+type areaIncidentResponse struct {
+	ReportID  string  `json:"report_id"`
+	Type      string  `json:"type"`
+	Severity  string  `json:"severity"`
+	DistanceM float64 `json:"distance_m"`
 }
 
 type savedPlaceResponse struct {
@@ -299,6 +312,10 @@ func utcPtr(t *time.Time) *time.Time {
 }
 
 func toSavedPlaceResponse(p domainfollow.PlaceWithSummary) savedPlaceResponse {
+	var top *areaIncidentResponse
+	if t := p.Summary.Top; t != nil {
+		top = &areaIncidentResponse{ReportID: t.ReportID.String(), Type: string(t.Type), Severity: string(t.Severity), DistanceM: math.Round(t.DistanceM)}
+	}
 	return savedPlaceResponse{
 		ID:                  p.ID.String(),
 		Name:                deref(p.Name),
@@ -315,6 +332,7 @@ func toSavedPlaceResponse(p domainfollow.PlaceWithSummary) savedPlaceResponse {
 			ActiveCount:    p.Summary.ActiveCount,
 			SevereCount:    p.Summary.SevereCount,
 			LatestUpdateAt: utcPtr(p.Summary.LatestUpdateAt),
+			Top:            top,
 		},
 	}
 }
