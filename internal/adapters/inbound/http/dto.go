@@ -544,18 +544,16 @@ type importantPlaceResponse struct {
 	Contact     *string   `json:"contact"`
 	Source      *string   `json:"source"`
 	Origin      string    `json:"origin"`
-	Mine        bool      `json:"mine"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-// toImportantPlaceResponse never exposes the creating device; deviceID (the
-// caller's, may be empty) only sets "mine".
-func toImportantPlaceResponse(p domainplace.Place, deviceID string) importantPlaceResponse {
+// toImportantPlaceResponse never exposes the creating device.
+func toImportantPlaceResponse(p domainplace.Place) importantPlaceResponse {
 	return importantPlaceResponse{
 		ID: p.ID.String(), Name: p.Name, Category: string(p.Category), Latitude: p.Latitude, Longitude: p.Longitude,
 		Address: p.Address, Status: string(p.Status), Description: p.Description, Contact: p.Contact, Source: p.Source,
-		Origin: string(p.Origin()), Mine: p.OwnedBy(deviceID),
+		Origin:    string(p.Origin()),
 		CreatedAt: p.CreatedAt.UTC(), UpdatedAt: p.UpdatedAt.UTC(),
 	}
 }
@@ -570,8 +568,6 @@ type importantPlaceRequest struct {
 	Description *string  `json:"description"`
 	Contact     *string  `json:"contact"`
 	Source      *string  `json:"source"`
-	// DeviceID identifies the caller on the public (non-admin) writes.
-	DeviceID string `json:"device_id"`
 }
 
 func (req importantPlaceRequest) toDomain() domainplace.Fields {

@@ -58,105 +58,63 @@ func (f *fakePlaces) Delete(ctx context.Context, id uuid.UUID) (bool, error) {
 	return false, nil
 }
 
-func (f *fakePlaces) CountByDeviceSince(ctx context.Context, deviceID string, since time.Time) (int, error) {
-	n := 0
-	for _, p := range f.places {
-		if p.OwnedBy(deviceID) && !p.CreatedAt.Before(since) {
-			n++
-		}
-	}
-	return n, nil
-}
-
-const device = "device-aaaaaaaa"
-
 var now = time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC)
 
 func ptr[T any](v T) *T { return &v }
-
-func validFields() domainplace.Fields {
-	return domainplace.Fields{
-		Name: ptr("Temple shelter"), Category: ptr(domainplace.CategoryShelter),
-		Latitude: ptr(13.75), Longitude: ptr(100.5), Source: ptr("should be dropped"),
-	}
-}
 
 func hasCode(err error, code apperr.Code) bool {
 	var ae *apperr.Error
 	return errors.As(err, &ae) && ae.Code == code
 }
 
-func TestCreateCommunityMarksOwnerAndDropsSource(t *testing.T) {
-	repo := &fakePlaces{}
-	svc := appplace.NewService(repo, fakeClock{now})
-	p, err := svc.CreateCommunity(context.Background(), device, validFields())
+func TestCreateIsOfficialAndKeepsSource(t *testing.T) {
+	svc := appplace.NewService(&fakePlaces{}, fakeClock{now})
+	p, err := svc.Create(context.Background(), domainplace.Fields{
+		Name: ptr("Temple shelter"), Category: ptr(domainplace.CategoryShelter),
+		Latitude: ptr(13.75), Longitude: ptr(100.5), Source: ptr("District office"),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Origin() != domainplace.OriginCommunity || !p.OwnedBy(device) {
-		t.Fatalf("want community place owned by device, got origin=%s", p.Origin())
+	if p.Origin() != domainplace.OriginOfficial {
+		t.Fatalf("origin = %s, want official", p.Origin())
 	}
-	if p.Source != nil {
-		t.Fatalf("community place must not carry a source, got %q", *p.Source)
+	if p.Source == nil || *p.Source != "District office" {
+		t.Fatalf("source not kept: %v", p.Source)
 	}
 	if p.Status != domainplace.StatusUnknown {
 		t.Fatalf("default status = %s, want unknown", p.Status)
 	}
 }
 
-func TestCreateCommunityValidates(t *testing.T) {
+func TestCreateValidates(t *testing.T) {
 	svc := appplace.NewService(&fakePlaces{}, fakeClock{now})
-	if _, err := svc.CreateCommunity(context.Background(), "short", validFields()); !hasCode(err, apperr.CodeValidation) {
-		t.Fatalf("bad device_id: want validation error, got %v", err)
-	}
-	f := validFields()
-	f.Name = nil
-	if _, err := svc.CreateCommunity(context.Background(), device, f); !hasCode(err, apperr.CodeValidation) {
+	f := domainplace.Fields{Category: ptr(domainplace.CategoryShelter), Latitude: ptr(13.75), Longitude: ptr(100.5)}
+	if _, err := svc.Create(context.Background(), f); !hasCode(err, apperr.CodeValidation) {
 		t.Fatalf("missing name: want validation error, got %v", err)
 	}
 }
 
-func TestCreateCommunityRateLimited(t *testing.T) {
-	repo := &fakePlaces{}
-	for i := 0; i < appplace.MaxCommunityPerDevicePerDay; i++ {
-		repo.places = append(repo.places, domainplace.Place{ID: uuid.New(), CreatedByDevice: ptr(device), CreatedAt: now.Add(-time.Hour)})
-	}
-	// Older than a day doesn't count.
-	repo.places[0].CreatedAt = now.Add(-25 * time.Hour)
+func TestOperatorCanChangeLegacyCommunityPlace(t *testing.T) {
+	legacy := domainplace.Place{ID: uuid.New(), Name: "Boat", Status: domainplace.StatusOpen, CreatedByDevice: ptr("device-aaaaaaaa")}
+	repo := &fakePlaces{places: []domainplace.Place{legacy}}
 	svc := appplace.NewService(repo, fakeClock{now})
-	if _, err := svc.CreateCommunity(context.Background(), device, validFields()); err != nil {
-		t.Fatalf("under the limit: %v", err)
+	ctx := context.Background()
+	p, err := svc.Update(ctx, legacy.ID, domainplace.Fields{Status: ptr(domainplace.StatusClosed)})
+	if err != nil || p.Status != domainplace.StatusClosed {
+		t.Fatalf("update: %v %+v", err, p)
 	}
-	if _, err := svc.CreateCommunity(context.Background(), device, validFields()); !hasCode(err, apperr.CodeRateLimited) {
-		t.Fatalf("over the limit: want rate limited, got %v", err)
+	if err := svc.Delete(ctx, legacy.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(repo.places) != 0 {
+		t.Fatalf("want 0 places left, got %d", len(repo.places))
 	}
 }
 
-func TestOnlyOwnerCanChangeCommunityPlace(t *testing.T) {
-	official := domainplace.Place{ID: uuid.New(), Name: "Hospital", Status: domainplace.StatusOpen}
-	mine := domainplace.Place{ID: uuid.New(), Name: "Boat", Status: domainplace.StatusOpen, CreatedByDevice: ptr(device)}
-	repo := &fakePlaces{places: []domainplace.Place{official, mine}}
-	svc := appplace.NewService(repo, fakeClock{now})
-	ctx := context.Background()
-	closed := domainplace.Fields{Status: ptr(domainplace.StatusClosed)}
-
-	if _, err := svc.UpdateOwn(ctx, device, official.ID, closed); !hasCode(err, apperr.CodeNotFound) {
-		t.Fatalf("editing an official place: want not found, got %v", err)
-	}
-	if _, err := svc.UpdateOwn(ctx, "other-device-1", mine.ID, closed); !hasCode(err, apperr.CodeNotFound) {
-		t.Fatalf("editing someone else's place: want not found, got %v", err)
-	}
-	if err := svc.DeleteOwn(ctx, "other-device-1", mine.ID); !hasCode(err, apperr.CodeNotFound) {
-		t.Fatalf("deleting someone else's place: want not found, got %v", err)
-	}
-	p, err := svc.UpdateOwn(ctx, device, mine.ID, closed)
-	if err != nil || p.Status != domainplace.StatusClosed {
-		t.Fatalf("owner update: %v %+v", err, p)
-	}
-	if err := svc.DeleteOwn(ctx, device, mine.ID); err != nil {
-		t.Fatalf("owner delete: %v", err)
-	}
-	if len(repo.places) != 1 {
-		t.Fatalf("want 1 place left, got %d", len(repo.places))
+func TestListRequiresBBox(t *testing.T) {
+	svc := appplace.NewService(&fakePlaces{}, fakeClock{now})
+	if _, err := svc.List(context.Background(), appplace.ListInput{}); !hasCode(err, apperr.CodeValidation) {
+		t.Fatalf("want validation error, got %v", err)
 	}
 }

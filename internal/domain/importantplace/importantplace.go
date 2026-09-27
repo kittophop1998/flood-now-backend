@@ -64,8 +64,9 @@ type Place struct {
 	Description *string
 	Contact     *string
 	Source      *string
-	// CreatedByDevice is the anonymous device that added the place; nil for
-	// operator-curated places. Never exposed by the API.
+	// CreatedByDevice is the anonymous device that added the place back when
+	// the app let anyone add places (now operator-only); nil for curated
+	// places. Never exposed by the API.
 	CreatedByDevice *string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
@@ -83,18 +84,6 @@ func (p Place) Origin() Origin {
 		return OriginCommunity
 	}
 	return OriginOfficial
-}
-
-// OwnedBy reports whether deviceID added this place.
-func (p Place) OwnedBy(deviceID string) bool {
-	return deviceID != "" && p.CreatedByDevice != nil && *p.CreatedByDevice == deviceID
-}
-
-func ValidateDeviceID(deviceID string) error {
-	if len(deviceID) < 8 || len(deviceID) > 128 {
-		return apperr.Validation("device_id is invalid", map[string]string{"device_id": "must be between 8 and 128 characters"})
-	}
-	return nil
 }
 
 // Fields is the editable part of a place; nil means "unchanged" on update.

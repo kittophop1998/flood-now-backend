@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -109,14 +108,4 @@ func (repo *ImportantPlaceRepository) Delete(ctx context.Context, id uuid.UUID) 
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
-}
-
-func (repo *ImportantPlaceRepository) CountByDeviceSince(ctx context.Context, deviceID string, since time.Time) (int, error) {
-	var n int
-	err := repo.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM important_places WHERE created_by_device = $1 AND created_at >= $2`, deviceID, since).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count important places by device: %w", err)
-	}
-	return n, nil
 }

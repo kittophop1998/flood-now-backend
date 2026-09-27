@@ -18,7 +18,7 @@ import (
 )
 
 // ImportantPlaceHandler serves the important-places map layer (public reads,
-// device-scoped community writes, operator writes).
+// operator-only writes).
 type ImportantPlaceHandler struct {
 	service *appplace.Service
 }
@@ -47,7 +47,7 @@ func (h *ImportantPlaceHandler) List(c *gin.Context) {
 	}
 	out := make([]importantPlaceResponse, 0, len(res.Places))
 	for _, pl := range res.Places {
-		out = append(out, toImportantPlaceResponse(pl, c.Query("device_id")))
+		out = append(out, toImportantPlaceResponse(pl))
 	}
 	c.JSON(http.StatusOK, gin.H{"places": out, "has_more": res.HasMore})
 }
@@ -62,50 +62,7 @@ func (h *ImportantPlaceHandler) Get(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toImportantPlaceResponse(*pl, c.Query("device_id")))
-}
-
-// CreateCommunity adds a place from the app on behalf of req.device_id.
-func (h *ImportantPlaceHandler) CreateCommunity(c *gin.Context) {
-	var req importantPlaceRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	pl, err := h.service.CreateCommunity(c.Request.Context(), req.DeviceID, req.toDomain())
-	if err != nil {
-		writeError(c, err)
-		return
-	}
-	c.JSON(http.StatusCreated, toImportantPlaceResponse(*pl, req.DeviceID))
-}
-
-func (h *ImportantPlaceHandler) UpdateOwn(c *gin.Context) {
-	id, ok := idParam(c, "important place")
-	if !ok {
-		return
-	}
-	var req importantPlaceRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	pl, err := h.service.UpdateOwn(c.Request.Context(), req.DeviceID, id, req.toDomain())
-	if err != nil {
-		writeError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, toImportantPlaceResponse(*pl, req.DeviceID))
-}
-
-func (h *ImportantPlaceHandler) DeleteOwn(c *gin.Context) {
-	id, ok := idParam(c, "important place")
-	if !ok {
-		return
-	}
-	if err := h.service.DeleteOwn(c.Request.Context(), c.Query("device_id"), id); err != nil {
-		writeError(c, err)
-		return
-	}
-	c.Status(http.StatusNoContent)
+	c.JSON(http.StatusOK, toImportantPlaceResponse(*pl))
 }
 
 func (h *ImportantPlaceHandler) Create(c *gin.Context) {
@@ -118,7 +75,7 @@ func (h *ImportantPlaceHandler) Create(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, toImportantPlaceResponse(*pl, ""))
+	c.JSON(http.StatusCreated, toImportantPlaceResponse(*pl))
 }
 
 func (h *ImportantPlaceHandler) Update(c *gin.Context) {
@@ -135,7 +92,7 @@ func (h *ImportantPlaceHandler) Update(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toImportantPlaceResponse(*pl, ""))
+	c.JSON(http.StatusOK, toImportantPlaceResponse(*pl))
 }
 
 func (h *ImportantPlaceHandler) Delete(c *gin.Context) {
