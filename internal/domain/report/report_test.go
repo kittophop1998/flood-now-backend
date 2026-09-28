@@ -256,30 +256,23 @@ func TestConfirmationInputValidate(t *testing.T) {
 
 func TestReactionInputValidate(t *testing.T) {
 	t.Run("valid like passes", func(t *testing.T) {
-		in := NewReactionInput{DeviceID: "12345678-aaaa-bbbb-cccc-dddddddddddd", Type: ReactionLike}
+		in := NewReactionInput{Type: ReactionLike}
 		if err := in.Validate(); err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
 	})
 
 	t.Run("valid support passes", func(t *testing.T) {
-		in := NewReactionInput{DeviceID: "12345678-aaaa-bbbb-cccc-dddddddddddd", Type: ReactionSupport}
+		in := NewReactionInput{Type: ReactionSupport}
 		if err := in.Validate(); err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
 	})
 
 	t.Run("invalid type rejected", func(t *testing.T) {
-		in := NewReactionInput{DeviceID: "12345678-aaaa-bbbb-cccc-dddddddddddd", Type: "love"}
+		in := NewReactionInput{Type: "love"}
 		if err := in.Validate(); err == nil {
 			t.Fatal("expected error for invalid reaction type")
-		}
-	})
-
-	t.Run("too-short device id rejected", func(t *testing.T) {
-		in := NewReactionInput{DeviceID: "short", Type: ReactionLike}
-		if err := in.Validate(); err == nil {
-			t.Fatal("expected error for short device id")
 		}
 	})
 }
@@ -338,5 +331,23 @@ func TestDetailsValidationAndNormalization(t *testing.T) {
 	closure := NewReportInput{Type: TypeRoadClosed, Severity: SeverityHigh, Latitude: 13.75, Longitude: 100.5, Details: Details{"closure": "sometimes"}}
 	if err := closure.Validate(); err == nil {
 		t.Error("an unknown closure value must be rejected")
+	}
+}
+
+func TestGuestReportableCategories(t *testing.T) {
+	want := map[Type]bool{
+		TypeFlooded: true, TypeRoadClosed: true, TypeAccident: true, TypeObstruction: true,
+		TypeRoadDamage: true, TypeTrafficSignal: true, TypePowerOutage: true,
+	}
+	for ty := range typeRules {
+		if got := ty.GuestReportable(); got != want[ty] {
+			t.Errorf("%s: GuestReportable = %v, want %v", ty, got, want[ty])
+		}
+		if ty.GuestReportable() && !ty.Creatable() {
+			t.Errorf("%s: a guest-reportable category must be creatable", ty)
+		}
+	}
+	if got := GuestReportableTypes(); len(got) != len(want) || got[0] != TypeFlooded {
+		t.Errorf("GuestReportableTypes() = %v", got)
 	}
 }

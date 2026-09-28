@@ -74,9 +74,23 @@ func (f *fakeFollows) Delete(ctx context.Context, deviceID string, id uuid.UUID,
 	return false, nil
 }
 
-func (f *fakeFollows) GetPlace(ctx context.Context, deviceID string, id uuid.UUID) (*domainfollow.Follow, error) {
+func ownedBy(fl domainfollow.Follow, userID uuid.UUID) bool {
+	return fl.Kind == domainfollow.KindPlace && fl.UserID != nil && *fl.UserID == userID
+}
+
+func (f *fakeFollows) CountPlaces(ctx context.Context, userID uuid.UUID) (int, error) {
+	n := 0
 	for _, fl := range f.follows {
-		if fl.ID == id && fl.DeviceID == deviceID && fl.Kind == domainfollow.KindPlace {
+		if ownedBy(fl, userID) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeFollows) GetPlace(ctx context.Context, userID, id uuid.UUID) (*domainfollow.Follow, error) {
+	for _, fl := range f.follows {
+		if fl.ID == id && ownedBy(fl, userID) {
 			cp := fl
 			return &cp, nil
 		}
@@ -93,14 +107,28 @@ func (f *fakeFollows) UpdatePlace(ctx context.Context, fl *domainfollow.Follow) 
 	return nil
 }
 
-func (f *fakeFollows) PlaceSummaries(ctx context.Context, deviceID string, severe []domainreport.Severity, facilities []domainreport.Type, now time.Time) ([]domainfollow.PlaceWithSummary, error) {
+func (f *fakeFollows) DeletePlace(ctx context.Context, userID, id uuid.UUID) (bool, error) {
+	for i, fl := range f.follows {
+		if fl.ID == id && ownedBy(fl, userID) {
+			f.follows = append(f.follows[:i], f.follows[i+1:]...)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeFollows) PlaceSummaries(ctx context.Context, userID uuid.UUID, severe []domainreport.Severity, facilities []domainreport.Type, now time.Time) ([]domainfollow.PlaceWithSummary, error) {
 	var out []domainfollow.PlaceWithSummary
 	for _, fl := range f.follows {
-		if fl.Kind == domainfollow.KindPlace && fl.DeviceID == deviceID {
+		if ownedBy(fl, userID) {
 			out = append(out, domainfollow.PlaceWithSummary{Follow: fl})
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeFollows) ClaimDevicePlaces(ctx context.Context, deviceID string, userID uuid.UUID, max int) error {
+	return nil
 }
 
 func (f *fakeFollows) Notifications(ctx context.Context, q ports.NotificationQuery) ([]ports.NotificationCandidate, error) {
@@ -122,6 +150,11 @@ func (f fakeReports) GetByID(ctx context.Context, id uuid.UUID) (*domainreport.R
 }
 
 const device = "12345678-aaaa-bbbb-cccc-dddddddddddd"
+
+var (
+	owner = uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	other = uuid.MustParse("22222222-2222-4222-8222-222222222222")
+)
 
 var now = time.Date(2026, 9, 25, 8, 0, 0, 0, time.UTC)
 
@@ -155,6 +188,9 @@ func followsOfKind(kind domainfollow.Kind, n int) []domainfollow.Follow {
 	out := make([]domainfollow.Follow, n)
 	for i := range out {
 		out[i] = domainfollow.Follow{ID: uuid.New(), DeviceID: device, Kind: kind}
+		if kind == domainfollow.KindPlace {
+			out[i].DeviceID, out[i].UserID = "", &owner
+		}
 	}
 	return out
 }
@@ -173,7 +209,7 @@ func TestSavedPlacesHaveTheirOwnCapAndDefaults(t *testing.T) {
 	follows := &fakeFollows{follows: followsOfKind(domainfollow.KindArea, domainfollow.MaxPerDevice)}
 	svc := appfollow.NewService(follows, fakeReports{}, fakeClock{now})
 	icon := domainfollow.IconHome
-	p, err := svc.CreatePlace(context.Background(), device, domainfollow.PlaceFields{
+	p, err := svc.CreatePlace(context.Background(), owner, domainfollow.PlaceFields{
 		Name: ptr("  บ้าน  "), Icon: &icon, Latitude: ptr(13.7), Longitude: ptr(100.5),
 	})
 	if err != nil {
@@ -183,8 +219,8 @@ func TestSavedPlacesHaveTheirOwnCapAndDefaults(t *testing.T) {
 		t.Errorf("place defaults not applied: name=%q radius=%d notify=%v kind=%s", *p.Name, *p.RadiusM, p.Notify, p.Kind)
 	}
 
-	follows.follows = append(follows.follows, followsOfKind(domainfollow.KindPlace, domainfollow.MaxPlacesPerDevice)...)
-	_, err = svc.CreatePlace(context.Background(), device, domainfollow.PlaceFields{
+	follows.follows = append(follows.follows, followsOfKind(domainfollow.KindPlace, domainfollow.MaxPlacesPerUser)...)
+	_, err = svc.CreatePlace(context.Background(), owner, domainfollow.PlaceFields{
 		Name: ptr("x"), Icon: &icon, Latitude: ptr(13.7), Longitude: ptr(100.5),
 	})
 	assertCode(t, err, apperr.CodeConflict)
@@ -194,17 +230,17 @@ func TestUpdatePlaceIsOwnerScopedAndPartial(t *testing.T) {
 	follows := &fakeFollows{}
 	svc := appfollow.NewService(follows, fakeReports{}, fakeClock{now})
 	icon := domainfollow.IconWork
-	p, err := svc.CreatePlace(context.Background(), device, domainfollow.PlaceFields{
+	p, err := svc.CreatePlace(context.Background(), owner, domainfollow.PlaceFields{
 		Name: ptr("Office"), Icon: &icon, Latitude: ptr(13.7), Longitude: ptr(100.5), PreferredVehicle: ptr("sedan"),
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err = svc.UpdatePlace(context.Background(), "someone-else-device", p.ID, domainfollow.PlaceFields{Notify: ptr(false)})
+	_, err = svc.UpdatePlace(context.Background(), other, p.ID, domainfollow.PlaceFields{Notify: ptr(false)})
 	assertCode(t, err, apperr.CodeNotFound)
 
-	updated, err := svc.UpdatePlace(context.Background(), device, p.ID, domainfollow.PlaceFields{Notify: ptr(false), RadiusM: ptr(5000), PreferredVehicle: ptr("")})
+	updated, err := svc.UpdatePlace(context.Background(), owner, p.ID, domainfollow.PlaceFields{Notify: ptr(false), RadiusM: ptr(5000), PreferredVehicle: ptr("")})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -212,7 +248,7 @@ func TestUpdatePlaceIsOwnerScopedAndPartial(t *testing.T) {
 		t.Errorf("partial update wrong: %+v", updated.Follow)
 	}
 
-	_, err = svc.UpdatePlace(context.Background(), device, p.ID, domainfollow.PlaceFields{RadiusM: ptr(2500)})
+	_, err = svc.UpdatePlace(context.Background(), owner, p.ID, domainfollow.PlaceFields{RadiusM: ptr(2500)})
 	assertCode(t, err, apperr.CodeValidation)
 }
 
@@ -229,7 +265,7 @@ func TestNotificationsMapsFiltersAndDedupes(t *testing.T) {
 	}}
 	svc := appfollow.NewService(follows, fakeReports{}, fakeClock{now})
 
-	items, err := svc.Notifications(context.Background(), device, nil)
+	items, err := svc.Notifications(context.Background(), device, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -244,9 +280,40 @@ func TestNotificationsMapsFiltersAndDedupes(t *testing.T) {
 	}
 
 	recent := now.Add(-time.Hour)
-	svc.Notifications(context.Background(), device, &recent) //nolint:errcheck
+	svc.Notifications(context.Background(), device, &owner, &recent) //nolint:errcheck
 	if !follows.lastQuery.Since.Equal(recent) {
 		t.Errorf("since not honored: %v", follows.lastQuery.Since)
+	}
+	if follows.lastQuery.UserID == nil || *follows.lastQuery.UserID != owner {
+		t.Errorf("signed-in user's saved places not included in the query: %v", follows.lastQuery.UserID)
+	}
+}
+
+func TestSavedPlacesArePrivateToTheirOwner(t *testing.T) {
+	follows := &fakeFollows{}
+	svc := appfollow.NewService(follows, fakeReports{}, fakeClock{now})
+	icon := domainfollow.IconCustom
+	p, err := svc.CreatePlace(context.Background(), owner, domainfollow.PlaceFields{
+		Name: ptr("บ้านพ่อแม่"), Icon: &icon, Latitude: ptr(13.7), Longitude: ptr(100.5),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.UserID == nil || *p.UserID != owner || p.DeviceID != "" {
+		t.Fatalf("place must belong to the user, got user=%v device=%q", p.UserID, p.DeviceID)
+	}
+
+	theirs, err := svc.Places(context.Background(), other)
+	if err != nil || len(theirs) != 0 {
+		t.Fatalf("another user sees %d places (err %v)", len(theirs), err)
+	}
+	assertCode(t, svc.DeletePlace(context.Background(), other, p.ID), apperr.CodeNotFound)
+	if err := svc.DeletePlace(context.Background(), owner, p.ID); err != nil {
+		t.Fatalf("owner delete failed: %v", err)
+	}
+	mine, _ := svc.Places(context.Background(), owner)
+	if len(mine) != 0 {
+		t.Errorf("place not deleted")
 	}
 }
 

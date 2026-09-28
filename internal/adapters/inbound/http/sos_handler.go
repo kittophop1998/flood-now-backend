@@ -11,6 +11,8 @@ import (
 
 // SOSHandler serves SOS requests and helper mode. Every endpoint takes the
 // caller's device_id; the service decides what that device may see or do.
+// Sending an SOS, accepting one and saving a helper profile additionally
+// need a signed-in user (enforced by the router's required auth).
 type SOSHandler struct {
 	service *appsos.Service
 }
@@ -45,7 +47,7 @@ func (h *SOSHandler) Create(c *gin.Context) {
 		return
 	}
 	v, err := h.service.Create(c.Request.Context(), domainsos.NewRequestInput{
-		DeviceID: req.DeviceID, ClientID: req.ClientID, Type: domainsos.Type(req.Type), Description: req.Description,
+		DeviceID: req.DeviceID, UserID: currentUserID(c), ClientID: req.ClientID, Type: domainsos.Type(req.Type), Description: req.Description,
 		Latitude: req.Latitude, Longitude: req.Longitude, PeopleCount: req.PeopleCount, ContactPhone: req.ContactPhone,
 	})
 	if err != nil {

@@ -32,12 +32,15 @@ var AllowedRadiiM = []int{1000, 3000, 5000}
 // the notification matching query arbitrarily expensive.
 const MaxPerDevice = 20
 
-// MaxPlacesPerDevice caps saved places per device, for the same reason.
-const MaxPlacesPerDevice = 10
+// MaxPlacesPerUser caps saved places per account, for the same reason.
+const MaxPlacesPerUser = 10
 
 type Follow struct {
-	ID        uuid.UUID
+	ID uuid.UUID
+	// DeviceID owns area/report follows. A saved place is owned by UserID;
+	// its DeviceID is "" (or the device it was saved on before accounts).
 	DeviceID  string
+	UserID    *uuid.UUID
 	Kind      Kind
 	ReportID  *uuid.UUID
 	Latitude  *float64

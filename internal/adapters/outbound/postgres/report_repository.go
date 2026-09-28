@@ -132,12 +132,12 @@ func (repo *ReportRepository) Create(ctx context.Context, r *report.Report) erro
 			id, type, severity, latitude, longitude, geometry_type,
 			water_depth, water_level_cm, pass_walk, pass_motorcycle, pass_sedan, pass_suv_pickup,
 			description, image_key, people_count, has_child, has_elderly, contact_phone,
-			created_at, updated_at, last_verified_at, stale_at, expires_at, client_id, details
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb)`,
+			created_at, updated_at, last_verified_at, stale_at, expires_at, client_id, details, user_id
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb,$26)`,
 		r.ID, r.Type, r.Severity, r.Latitude, r.Longitude, r.GeometryType,
 		waterDepth, r.WaterLevelCM, pass[0], pass[1], pass[2], pass[3],
 		r.Description, r.ImageKey, r.PeopleCount, r.HasChild, r.HasElderly, r.ContactPhone,
-		r.CreatedAt, r.UpdatedAt, r.LastVerifiedAt, r.StaleAt, r.ExpiresAt, r.ClientID, details,
+		r.CreatedAt, r.UpdatedAt, r.LastVerifiedAt, r.StaleAt, r.ExpiresAt, r.ClientID, details, r.UserID,
 	); err != nil {
 		if isUniqueViolation(err) {
 			return apperr.Conflict("a report with this client_id already exists")
@@ -573,17 +573,17 @@ func applyConditionUpdate(ctx context.Context, tx *sql.Tx, reportID uuid.UUID, u
 	return nil
 }
 
-// React upserts the device's reaction (a repeat is a no-op; a different type
+// React upserts the user's reaction (a repeat is a no-op; a different type
 // switches it) and reloads the report with fresh like/support counts. Unlike
 // Confirm this needs no row lock: it never reads-then-writes the report row,
 // and the counts are always computed fresh from report_reactions on read.
-func (repo *ReportRepository) React(ctx context.Context, reportID uuid.UUID, deviceID string, reactionType report.ReactionType) (*report.ReportWithStats, error) {
+func (repo *ReportRepository) React(ctx context.Context, reportID, userID uuid.UUID, reactionType report.ReactionType) (*report.ReportWithStats, error) {
 	if _, err := repo.db.ExecContext(ctx, `
-		INSERT INTO report_reactions (id, report_id, device_id, type, created_at, updated_at)
+		INSERT INTO report_reactions (id, report_id, user_id, type, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,now(),now())
-		ON CONFLICT (report_id, device_id)
+		ON CONFLICT (report_id, user_id) WHERE user_id IS NOT NULL
 		DO UPDATE SET type = EXCLUDED.type, updated_at = EXCLUDED.updated_at`,
-		uuid.New(), reportID, deviceID, reactionType,
+		uuid.New(), reportID, userID, reactionType,
 	); err != nil {
 		if isForeignKeyViolation(err) {
 			return nil, nil
@@ -597,11 +597,11 @@ func (repo *ReportRepository) React(ctx context.Context, reportID uuid.UUID, dev
 	return r, nil
 }
 
-// RemoveReaction clears the device's reaction, if any, and reloads the
+// RemoveReaction clears the user's reaction, if any, and reloads the
 // report. Removing a reaction that doesn't exist is a no-op.
-func (repo *ReportRepository) RemoveReaction(ctx context.Context, reportID uuid.UUID, deviceID string) (*report.ReportWithStats, error) {
+func (repo *ReportRepository) RemoveReaction(ctx context.Context, reportID, userID uuid.UUID) (*report.ReportWithStats, error) {
 	if _, err := repo.db.ExecContext(ctx,
-		`DELETE FROM report_reactions WHERE report_id = $1 AND device_id = $2`, reportID, deviceID,
+		`DELETE FROM report_reactions WHERE report_id = $1 AND user_id = $2`, reportID, userID,
 	); err != nil {
 		return nil, fmt.Errorf("delete reaction: %w", err)
 	}
@@ -610,6 +610,21 @@ func (repo *ReportRepository) RemoveReaction(ctx context.Context, reportID uuid.
 		return nil, fmt.Errorf("reload report: %w", err)
 	}
 	return r, nil
+}
+
+// MyReaction returns the user's reaction to a report, or nil.
+func (repo *ReportRepository) MyReaction(ctx context.Context, reportID, userID uuid.UUID) (*report.ReactionType, error) {
+	var t report.ReactionType
+	err := repo.db.QueryRowContext(ctx,
+		`SELECT type FROM report_reactions WHERE report_id = $1 AND user_id = $2`, reportID, userID,
+	).Scan(&t)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get reaction: %w", err)
+	}
+	return &t, nil
 }
 
 // isForeignKeyViolation reports a Postgres FK-constraint error (the report
@@ -649,11 +664,14 @@ func (repo *ReportRepository) ImageCleanupCandidates(ctx context.Context, cutoff
 	return out, rows.Err()
 }
 
-// ImageKeyReferenced reports whether any report still carries key.
+// ImageKeyReferenced reports whether any report still carries key. Community
+// events take their photo from the same public presign (a reports/ key), so
+// a key an event still uses counts as referenced too.
 func (repo *ReportRepository) ImageKeyReferenced(ctx context.Context, key string) (bool, error) {
 	var referenced bool
 	if err := repo.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM reports WHERE image_key = $1)`, key,
+		`SELECT EXISTS(SELECT 1 FROM reports WHERE image_key = $1)
+			OR EXISTS(SELECT 1 FROM community_events WHERE image_key = $1)`, key,
 	).Scan(&referenced); err != nil {
 		return false, fmt.Errorf("check report image reference: %w", err)
 	}

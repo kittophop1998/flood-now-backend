@@ -43,9 +43,13 @@ type View struct {
 	NearbyHelpers *int
 }
 
-// Create files a new SOS. A device can have only one open request; with a
-// ClientID a retried submission returns the original request.
+// Create files a new SOS. Only a signed-in user may send one (guests can
+// report incidents but not request help). A device can have only one open
+// request; with a ClientID a retried submission returns the original request.
 func (s *Service) Create(ctx context.Context, in domainsos.NewRequestInput) (*View, error) {
+	if in.UserID == nil {
+		return nil, apperr.Unauthorized("sign in to send an SOS")
+	}
 	if err := in.Validate(); err != nil {
 		return nil, err
 	}
@@ -62,6 +66,7 @@ func (s *Service) Create(ctx context.Context, in domainsos.NewRequestInput) (*Vi
 	r := &domainsos.Request{
 		ID:           uuid.New(),
 		DeviceID:     in.DeviceID,
+		UserID:       in.UserID,
 		ClientID:     in.ClientID,
 		Type:         in.Type,
 		Description:  domainsos.Trimmed(in.Description),

@@ -360,7 +360,27 @@ func (h *ReportHandler) Get(c *gin.Context) {
 		writeError(c, err)
 		return
 	}
+	// Signed in: personalize with the caller's own reaction.
+	if userID := currentUserID(c); userID != nil {
+		h.respondWithReaction(c, http.StatusOK, r, *userID)
+		return
+	}
 	c.JSON(http.StatusOK, h.presenter.one(*r))
+}
+
+// respondWithReaction writes r plus the user's own reaction (my_reaction).
+func (h *ReportHandler) respondWithReaction(c *gin.Context, status int, r *domainreport.ReportWithStats, userID uuid.UUID) {
+	mine, err := h.service.MyReaction(c.Request.Context(), r.ID, userID)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	out := reportWithReactionResponse{reportResponse: h.presenter.one(*r)}
+	if mine != nil {
+		s := string(*mine)
+		out.MyReaction = &s
+	}
+	c.JSON(status, out)
 }
 
 func (h *ReportHandler) Create(c *gin.Context) {
@@ -370,7 +390,7 @@ func (h *ReportHandler) Create(c *gin.Context) {
 		return
 	}
 
-	r, err := h.service.Create(c.Request.Context(), req.toDomain())
+	r, err := h.service.Create(c.Request.Context(), req.toDomain(), currentUserID(c))
 	if err != nil {
 		writeError(c, err)
 		return
@@ -399,7 +419,7 @@ func (h *ReportHandler) Confirm(c *gin.Context) {
 	c.JSON(http.StatusOK, h.presenter.one(*r))
 }
 
-// React sets (creates or switches) the caller device's like/support reaction.
+// React sets (creates or switches) the signed-in user's like/support reaction.
 func (h *ReportHandler) React(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -413,15 +433,16 @@ func (h *ReportHandler) React(c *gin.Context) {
 		return
 	}
 
-	r, err := h.service.React(c.Request.Context(), id, req.toDomain())
+	userID := mustUserID(c)
+	r, err := h.service.React(c.Request.Context(), id, userID, req.toDomain())
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, h.presenter.one(*r))
+	h.respondWithReaction(c, http.StatusOK, r, userID)
 }
 
-// RemoveReaction clears the caller device's reaction, if any.
+// RemoveReaction clears the signed-in user's reaction, if any.
 func (h *ReportHandler) RemoveReaction(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -429,10 +450,11 @@ func (h *ReportHandler) RemoveReaction(c *gin.Context) {
 		return
 	}
 
-	r, err := h.service.RemoveReaction(c.Request.Context(), id, c.Query("device_id"))
+	userID := mustUserID(c)
+	r, err := h.service.RemoveReaction(c.Request.Context(), id, userID)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, h.presenter.one(*r))
+	h.respondWithReaction(c, http.StatusOK, r, userID)
 }

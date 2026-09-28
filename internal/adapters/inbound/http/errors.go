@@ -24,6 +24,8 @@ func statusForCode(code apperr.Code) int {
 		return http.StatusServiceUnavailable
 	case apperr.CodeUnauthorized:
 		return http.StatusUnauthorized
+	case apperr.CodeForbidden:
+		return http.StatusForbidden
 	case apperr.CodeRateLimited:
 		return http.StatusTooManyRequests
 	default:

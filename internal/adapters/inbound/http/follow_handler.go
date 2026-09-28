@@ -73,7 +73,7 @@ func (h *FollowHandler) Notifications(c *gin.Context) {
 		return
 	}
 
-	items, err := h.service.Notifications(c.Request.Context(), c.Query("device_id"), since)
+	items, err := h.service.Notifications(c.Request.Context(), c.Query("device_id"), currentUserID(c), since)
 	if err != nil {
 		writeError(c, err)
 		return

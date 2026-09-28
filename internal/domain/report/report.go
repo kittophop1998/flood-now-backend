@@ -35,24 +35,29 @@ const (
 // long-lived (shelters, aid points, road damage and construction use the
 // longer freshness window), whether it's a facility rather than an incident,
 // how close a same-category report must be to count as a likely duplicate,
-// and whether it's a legacy category that stored reports may still carry but
-// new reports may not use (someone who needs help uses the SOS flow instead).
+// whether it's a legacy category that stored reports may still carry but
+// new reports may not use (someone who needs help uses the SOS flow instead),
+// and whether a guest (not signed in) may report it. Guest-reportable is the
+// single source of truth for the guest permission: only safety-critical
+// hazards people nearby need to know about right now. Planned roadworks and
+// facilities (shelters, aid points) need a signed-in reporter.
 var typeRules = map[Type]struct {
 	affectsRoad     bool
 	longLived       bool
 	facility        bool
 	duplicateRadius float64 // meters
 	legacy          bool
+	guestReportable bool
 }{
-	TypeFlooded:        {affectsRoad: true, duplicateRadius: 150},
-	TypeRoadClosed:     {affectsRoad: true, duplicateRadius: 100},
-	TypeAccident:       {affectsRoad: true, duplicateRadius: 75},
+	TypeFlooded:        {affectsRoad: true, duplicateRadius: 150, guestReportable: true},
+	TypeRoadClosed:     {affectsRoad: true, duplicateRadius: 100, guestReportable: true},
+	TypeAccident:       {affectsRoad: true, duplicateRadius: 75, guestReportable: true},
 	TypeVehicleStalled: {affectsRoad: true, duplicateRadius: 50, legacy: true},
-	TypeObstruction:    {affectsRoad: true, duplicateRadius: 50},
-	TypeRoadDamage:     {affectsRoad: true, longLived: true, duplicateRadius: 50},
+	TypeObstruction:    {affectsRoad: true, duplicateRadius: 50, guestReportable: true},
+	TypeRoadDamage:     {affectsRoad: true, longLived: true, duplicateRadius: 50, guestReportable: true},
 	TypeConstruction:   {affectsRoad: true, longLived: true, duplicateRadius: 150},
-	TypeTrafficSignal:  {duplicateRadius: 75},
-	TypePowerOutage:    {duplicateRadius: 150},
+	TypeTrafficSignal:  {duplicateRadius: 75, guestReportable: true},
+	TypePowerOutage:    {duplicateRadius: 150, guestReportable: true},
 	TypeHelpNeeded:     {duplicateRadius: 50, legacy: true},
 	TypeShelter:        {longLived: true, facility: true, duplicateRadius: 100},
 	TypeAidPoint:       {longLived: true, facility: true, duplicateRadius: 100},
@@ -79,6 +84,25 @@ func (t Type) Valid() bool {
 func (t Type) Creatable() bool {
 	r, ok := typeRules[t]
 	return ok && !r.legacy
+}
+
+// GuestReportable reports whether someone who isn't signed in may create a
+// new report of category t (see typeRules). Always false for legacy
+// categories.
+func (t Type) GuestReportable() bool {
+	r, ok := typeRules[t]
+	return ok && !r.legacy && r.guestReportable
+}
+
+// GuestReportableTypes lists the guest-reportable categories in display order.
+func GuestReportableTypes() []Type {
+	var out []Type
+	for _, s := range creatableTypes {
+		if t := Type(s); t.GuestReportable() {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // AffectsRoad reports whether per-vehicle passability is meaningful for t.
@@ -248,6 +272,9 @@ type Report struct {
 	// public read.
 	HiddenAt     *time.Time
 	HiddenReason *HiddenReason
+	// UserID is the signed-in reporter; nil for a guest report. Stored for
+	// ownership/abuse handling only — never returned by the public API.
+	UserID *uuid.UUID
 }
 
 // HiddenReason records who hid a report.

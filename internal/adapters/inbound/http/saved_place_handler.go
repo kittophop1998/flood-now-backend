@@ -30,8 +30,8 @@ func bindJSON(c *gin.Context, dst any) bool {
 	return true
 }
 
-// SavedPlaceHandler serves saved places (and their watch areas). Places are
-// private to the device that saved them.
+// SavedPlaceHandler serves saved places (and their watch areas). Every route
+// sits behind required auth; places are private to the signed-in user.
 type SavedPlaceHandler struct {
 	service *appfollow.Service
 }
@@ -41,7 +41,7 @@ func NewSavedPlaceHandler(service *appfollow.Service) *SavedPlaceHandler {
 }
 
 func (h *SavedPlaceHandler) List(c *gin.Context) {
-	places, err := h.service.Places(c.Request.Context(), c.Query("device_id"))
+	places, err := h.service.Places(c.Request.Context(), mustUserID(c))
 	if err != nil {
 		writeError(c, err)
 		return
@@ -58,7 +58,7 @@ func (h *SavedPlaceHandler) Create(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	p, err := h.service.CreatePlace(c.Request.Context(), req.DeviceID, req.toDomain())
+	p, err := h.service.CreatePlace(c.Request.Context(), mustUserID(c), req.toDomain())
 	if err != nil {
 		writeError(c, err)
 		return
@@ -75,7 +75,7 @@ func (h *SavedPlaceHandler) Update(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	p, err := h.service.UpdatePlace(c.Request.Context(), req.DeviceID, id, req.toDomain())
+	p, err := h.service.UpdatePlace(c.Request.Context(), mustUserID(c), id, req.toDomain())
 	if err != nil {
 		writeError(c, err)
 		return
@@ -88,7 +88,7 @@ func (h *SavedPlaceHandler) Delete(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := h.service.DeletePlace(c.Request.Context(), c.Query("device_id"), id); err != nil {
+	if err := h.service.DeletePlace(c.Request.Context(), mustUserID(c), id); err != nil {
 		writeError(c, err)
 		return
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	appauth "floodnow-api/internal/application/auth"
 	"floodnow-api/internal/domain/apperr"
 )
 
@@ -29,7 +30,12 @@ type Deps struct {
 	ConfigHandler         *ConfigHandler
 	OfficialFloodHandler  *OfficialFloodHandler
 	CCTVHandler           *CCTVHandler
-	WebOrigin             string
+	AuthHandler           *AuthHandler
+	EventHandler          *EventHandler
+	// AuthService resolves user session tokens; nil means nobody is ever
+	// signed in (tests that don't need accounts).
+	AuthService *appauth.Service
+	WebOrigin   string
 	// AdminToken gates /api/v1/admin/*. Empty disables those routes.
 	AdminToken string
 }
@@ -45,45 +51,71 @@ func NewRouter(deps Deps) *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
+	// Guest-first: every read is public. optionalAuth only personalizes
+	// (e.g. my_reaction, is_mine) and lets a signed-in reporter own a
+	// report; requireAuth guards interactions, private data and owned
+	// content (401 UNAUTHORIZED for guests). Who may do what is decided in
+	// the application layer.
+	optionalAuth := authMiddleware(deps.AuthService, false)
+	requireAuth := authMiddleware(deps.AuthService, true)
+	// Per-IP brakes (in-memory, per instance): anonymous report creation and
+	// password guessing. Generous, since many phones share a carrier IP.
+	guestReportLimit := rateLimit(newRateLimiter(30, 10*time.Minute), true)
+	loginLimit := rateLimit(newRateLimiter(30, 10*time.Minute), false)
+	registerLimit := rateLimit(newRateLimiter(30, time.Hour), false)
+
 	v1 := r.Group("/api/v1")
 	{
 		v1.GET("/config/public", deps.ConfigHandler.Public)
+
+		v1.POST("/auth/register", registerLimit, deps.AuthHandler.Register)
+		v1.POST("/auth/login", loginLimit, deps.AuthHandler.Login)
+		v1.POST("/auth/logout", requireAuth, deps.AuthHandler.Logout)
+		v1.GET("/auth/me", requireAuth, deps.AuthHandler.Me)
 
 		v1.GET("/reports", deps.ReportHandler.List)
 		v1.GET("/reports/aggregate", deps.ReportHandler.Aggregate)
 		v1.GET("/reports/nearby", deps.ReportHandler.Nearby)
 		v1.GET("/reports/duplicates", deps.ReportHandler.Duplicates)
-		v1.GET("/reports/:id", deps.ReportHandler.Get)
-		v1.POST("/reports", deps.ReportHandler.Create)
+		v1.GET("/reports/:id", optionalAuth, deps.ReportHandler.Get)
+		v1.POST("/reports", optionalAuth, guestReportLimit, deps.ReportHandler.Create)
 		v1.POST("/reports/:id/confirmations", deps.ReportHandler.Confirm)
-		v1.POST("/reports/:id/reactions", deps.ReportHandler.React)
-		v1.DELETE("/reports/:id/reactions", deps.ReportHandler.RemoveReaction)
+		v1.POST("/reports/:id/reactions", requireAuth, deps.ReportHandler.React)
+		v1.DELETE("/reports/:id/reactions", requireAuth, deps.ReportHandler.RemoveReaction)
 		v1.POST("/reports/:id/problems", deps.ModerationHandler.ReportProblem)
 		v1.POST("/uploads/presign", deps.UploadHandler.Presign)
 
 		v1.GET("/follows", deps.FollowHandler.List)
 		v1.POST("/follows", deps.FollowHandler.Create)
 		v1.DELETE("/follows/:id", deps.FollowHandler.Delete)
-		v1.GET("/notifications", deps.FollowHandler.Notifications)
+		v1.GET("/notifications", optionalAuth, deps.FollowHandler.Notifications)
 
 		v1.GET("/places/search", deps.PlaceHandler.Search)
 		v1.GET("/places/reverse", deps.PlaceHandler.Reverse)
 
-		v1.GET("/saved-places", deps.SavedPlaceHandler.List)
-		v1.POST("/saved-places", deps.SavedPlaceHandler.Create)
-		v1.PATCH("/saved-places/:id", deps.SavedPlaceHandler.Update)
-		v1.DELETE("/saved-places/:id", deps.SavedPlaceHandler.Delete)
+		v1.GET("/saved-places", requireAuth, deps.SavedPlaceHandler.List)
+		v1.POST("/saved-places", requireAuth, deps.SavedPlaceHandler.Create)
+		v1.PATCH("/saved-places/:id", requireAuth, deps.SavedPlaceHandler.Update)
+		v1.DELETE("/saved-places/:id", requireAuth, deps.SavedPlaceHandler.Delete)
 
 		v1.POST("/routes/evaluate", deps.RouteHandler.Evaluate)
 
-		v1.POST("/sos", deps.SOSHandler.Create)
+		v1.POST("/sos", requireAuth, deps.SOSHandler.Create)
 		v1.GET("/sos/mine", deps.SOSHandler.Mine)
 		v1.GET("/sos/:id", deps.SOSHandler.Get)
-		v1.POST("/sos/:id/accept", deps.SOSHandler.Accept)
+		v1.POST("/sos/:id/accept", requireAuth, deps.SOSHandler.Accept)
 		v1.POST("/sos/:id/status", deps.SOSHandler.UpdateStatus)
 		v1.GET("/helpers/me", deps.SOSHandler.GetHelper)
-		v1.PUT("/helpers/me", deps.SOSHandler.SaveHelper)
+		v1.PUT("/helpers/me", requireAuth, deps.SOSHandler.SaveHelper)
 		v1.GET("/helpers/sos/nearby", deps.SOSHandler.Nearby)
+
+		v1.GET("/events", optionalAuth, deps.EventHandler.List)
+		v1.GET("/events/mine", requireAuth, deps.EventHandler.Mine)
+		v1.GET("/events/:id", optionalAuth, deps.EventHandler.Get)
+		v1.POST("/events", requireAuth, deps.EventHandler.Create)
+		v1.PATCH("/events/:id", requireAuth, deps.EventHandler.Update)
+		v1.POST("/events/:id/cancel", requireAuth, deps.EventHandler.Cancel)
+		v1.DELETE("/events/:id", requireAuth, deps.EventHandler.Delete)
 
 		v1.GET("/important-places", deps.ImportantPlaceHandler.List)
 		v1.GET("/important-places/:id", deps.ImportantPlaceHandler.Get)
@@ -134,9 +166,10 @@ func corsMiddleware(webOrigin string) gin.HandlerFunc {
 	}
 }
 
-// adminMiddleware requires "Authorization: Bearer <ADMIN_TOKEN>". FloodNow
-// has no user accounts; this shared operator token is the whole admin
-// system. With no token configured the admin API doesn't exist (404).
+// adminMiddleware requires "Authorization: Bearer <ADMIN_TOKEN>". User
+// accounts never grant operator rights; this shared operator token is the
+// whole admin system. With no token configured the admin API doesn't exist
+// (404).
 func adminMiddleware(token string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if token == "" {

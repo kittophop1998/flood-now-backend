@@ -161,13 +161,22 @@ func (req confirmReportRequest) toDomain() domainreport.NewConfirmationInput {
 	return in
 }
 
+// reactionRequest's former device_id field is ignored: reactions belong to
+// the signed-in user now.
 type reactionRequest struct {
-	DeviceID string `json:"device_id"`
-	Type     string `json:"type"`
+	Type string `json:"type"`
 }
 
 func (req reactionRequest) toDomain() domainreport.NewReactionInput {
-	return domainreport.NewReactionInput{DeviceID: req.DeviceID, Type: domainreport.ReactionType(req.Type)}
+	return domainreport.NewReactionInput{Type: domainreport.ReactionType(req.Type)}
+}
+
+// reportWithReactionResponse is a report as seen by a signed-in user:
+// my_reaction is their own reaction (null when none). Only returned where
+// the caller is known (GET /reports/:id with a session, react/unreact).
+type reportWithReactionResponse struct {
+	reportResponse
+	MyReaction *string `json:"my_reaction"`
 }
 
 type followResponse struct {
@@ -348,8 +357,9 @@ func toSavedPlaceResponse(p domainfollow.PlaceWithSummary) savedPlaceResponse {
 	}
 }
 
+// savedPlaceRequest: a former device_id field is ignored — saved places
+// belong to the signed-in user.
 type savedPlaceRequest struct {
-	DeviceID            string   `json:"device_id"`
 	Name                *string  `json:"name"`
 	Icon                *string  `json:"icon"`
 	Latitude            *float64 `json:"latitude"`

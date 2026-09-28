@@ -144,8 +144,12 @@ func CanTransition(from, to Status, role Role) bool {
 
 // Request is an SOS.
 type Request struct {
-	ID             uuid.UUID
-	DeviceID       string
+	ID       uuid.UUID
+	DeviceID string
+	// UserID is the signed-in requester's account (sending an SOS needs
+	// one); nil on requests made before accounts existed. The requester's
+	// device still scopes reads and status changes, as before.
+	UserID         *uuid.UUID
 	ClientID       *string
 	Type           Type
 	Description    *string
@@ -200,6 +204,7 @@ func ValidateDeviceID(deviceID string) error {
 // NewRequestInput is what a requester sends.
 type NewRequestInput struct {
 	DeviceID     string
+	UserID       *uuid.UUID
 	ClientID     *string
 	Type         Type
 	Description  *string

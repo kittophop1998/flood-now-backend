@@ -53,10 +53,10 @@ func (repo *SOSRepository) Create(ctx context.Context, r *sos.Request) error {
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO sos_requests (id, device_id, client_id, type, description, latitude, longitude,
-			people_count, contact_phone, status, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)`,
+			people_count, contact_phone, status, created_at, updated_at, user_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12)`,
 		r.ID, r.DeviceID, r.ClientID, r.Type, r.Description, r.Latitude, r.Longitude,
-		r.PeopleCount, r.ContactPhone, r.Status, r.CreatedAt,
+		r.PeopleCount, r.ContactPhone, r.Status, r.CreatedAt, r.UserID,
 	); err != nil {
 		if isUniqueViolation(err) {
 			return apperr.Conflict("you already have an open SOS request; cancel it before sending a new one")

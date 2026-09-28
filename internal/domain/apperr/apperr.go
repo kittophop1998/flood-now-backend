@@ -15,6 +15,7 @@ const (
 	CodeUnavailable     Code = "UPSTREAM_UNAVAILABLE"
 	CodeInternal        Code = "INTERNAL_ERROR"
 	CodeUnauthorized    Code = "UNAUTHORIZED"
+	CodeForbidden       Code = "FORBIDDEN"
 	CodeRateLimited     Code = "RATE_LIMITED"
 )
 
@@ -42,9 +43,16 @@ func Conflict(message string) *Error {
 	return &Error{Code: CodeConflict, Message: message}
 }
 
-// Unauthorized means missing/invalid operator credentials (admin routes).
+// Unauthorized means the caller must sign in (or send a valid operator
+// token, on admin routes) to do this.
 func Unauthorized(message string) *Error {
 	return &Error{Code: CodeUnauthorized, Message: message}
+}
+
+// Forbidden means the caller is signed in but may not act on this resource
+// (e.g. editing someone else's event).
+func Forbidden(message string) *Error {
+	return &Error{Code: CodeForbidden, Message: message}
 }
 
 // RateLimited means the caller did the same thing too often; retry later.

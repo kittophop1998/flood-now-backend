@@ -110,18 +110,16 @@ func (s *Service) Delete(ctx context.Context, deviceID string, id uuid.UUID) err
 	return nil
 }
 
-// Places lists the device's saved places with the current state of each
+// Places lists the user's saved places with the current state of each
 // watch area (open incidents inside the radius), computed in one query.
-func (s *Service) Places(ctx context.Context, deviceID string) ([]domainfollow.PlaceWithSummary, error) {
-	if err := domainfollow.ValidateDeviceID(deviceID); err != nil {
-		return nil, err
-	}
-	return s.follows.PlaceSummaries(ctx, deviceID, domainreport.SevereSeverities(), domainreport.FacilityTypes(), s.clock.Now())
+// Saved places are private: every read and write is scoped to their owner.
+func (s *Service) Places(ctx context.Context, userID uuid.UUID) ([]domainfollow.PlaceWithSummary, error) {
+	return s.follows.PlaceSummaries(ctx, userID, domainreport.SevereSeverities(), domainreport.FacilityTypes(), s.clock.Now())
 }
 
-// place returns one of the device's saved places with its summary.
-func (s *Service) place(ctx context.Context, deviceID string, id uuid.UUID) (*domainfollow.PlaceWithSummary, error) {
-	all, err := s.Places(ctx, deviceID)
+// place returns one of the user's saved places with its summary.
+func (s *Service) place(ctx context.Context, userID, id uuid.UUID) (*domainfollow.PlaceWithSummary, error) {
+	all, err := s.Places(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -133,12 +131,9 @@ func (s *Service) place(ctx context.Context, deviceID string, id uuid.UUID) (*do
 	return nil, apperr.NotFound("saved place not found")
 }
 
-// CreatePlace saves a named place. Its radius is the watch area; alerts for
-// it are on unless Notify is false.
-func (s *Service) CreatePlace(ctx context.Context, deviceID string, in domainfollow.PlaceFields) (*domainfollow.PlaceWithSummary, error) {
-	if err := domainfollow.ValidateDeviceID(deviceID); err != nil {
-		return nil, err
-	}
+// CreatePlace saves a named place for the user. Its radius is the watch
+// area; alerts for it are on unless Notify is false.
+func (s *Service) CreatePlace(ctx context.Context, userID uuid.UUID, in domainfollow.PlaceFields) (*domainfollow.PlaceWithSummary, error) {
 	if in.RadiusM == nil {
 		r := domainfollow.AllowedRadiiM[0]
 		in.RadiusM = &r
@@ -146,32 +141,30 @@ func (s *Service) CreatePlace(ctx context.Context, deviceID string, in domainfol
 	if err := in.Validate(true); err != nil {
 		return nil, err
 	}
-	count, err := s.follows.CountByDevice(ctx, deviceID, domainfollow.KindPlace)
+	count, err := s.follows.CountPlaces(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	if count >= domainfollow.MaxPlacesPerDevice {
+	if count >= domainfollow.MaxPlacesPerUser {
 		return nil, apperr.Conflict("too many saved places; remove one first")
 	}
 	now := s.clock.Now()
-	f := &domainfollow.Follow{ID: uuid.New(), DeviceID: deviceID, Kind: domainfollow.KindPlace, Notify: true, CreatedAt: now, UpdatedAt: now}
+	owner := userID
+	f := &domainfollow.Follow{ID: uuid.New(), UserID: &owner, Kind: domainfollow.KindPlace, Notify: true, CreatedAt: now, UpdatedAt: now}
 	in.Apply(f)
 	if err := s.follows.Create(ctx, f); err != nil {
 		return nil, err
 	}
-	return s.place(ctx, deviceID, f.ID)
+	return s.place(ctx, userID, f.ID)
 }
 
-// UpdatePlace edits a saved place the device owns (including its watch
-// radius and notification switch).
-func (s *Service) UpdatePlace(ctx context.Context, deviceID string, id uuid.UUID, in domainfollow.PlaceFields) (*domainfollow.PlaceWithSummary, error) {
-	if err := domainfollow.ValidateDeviceID(deviceID); err != nil {
-		return nil, err
-	}
+// UpdatePlace edits a saved place the user owns (including its watch radius
+// and notification switch). Someone else's place is NOT_FOUND.
+func (s *Service) UpdatePlace(ctx context.Context, userID, id uuid.UUID, in domainfollow.PlaceFields) (*domainfollow.PlaceWithSummary, error) {
 	if err := in.Validate(false); err != nil {
 		return nil, err
 	}
-	f, err := s.follows.GetPlace(ctx, deviceID, id)
+	f, err := s.follows.GetPlace(ctx, userID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -183,14 +176,11 @@ func (s *Service) UpdatePlace(ctx context.Context, deviceID string, id uuid.UUID
 	if err := s.follows.UpdatePlace(ctx, f); err != nil {
 		return nil, err
 	}
-	return s.place(ctx, deviceID, id)
+	return s.place(ctx, userID, id)
 }
 
-func (s *Service) DeletePlace(ctx context.Context, deviceID string, id uuid.UUID) error {
-	if err := domainfollow.ValidateDeviceID(deviceID); err != nil {
-		return err
-	}
-	ok, err := s.follows.Delete(ctx, deviceID, id, domainfollow.KindPlace)
+func (s *Service) DeletePlace(ctx context.Context, userID, id uuid.UUID) error {
+	ok, err := s.follows.DeletePlace(ctx, userID, id)
 	if err != nil {
 		return err
 	}
@@ -200,9 +190,10 @@ func (s *Service) DeletePlace(ctx context.Context, deviceID string, id uuid.UUID
 	return nil
 }
 
-// Notifications returns what happened to the device's follows since `since`
+// Notifications returns what happened to the device's follows — and, for a
+// signed-in user (userID non-nil), their saved places — since `since`
 // (newest first). This is pull-based in-app delivery; no push is sent.
-func (s *Service) Notifications(ctx context.Context, deviceID string, since *time.Time) ([]domainfollow.Notification, error) {
+func (s *Service) Notifications(ctx context.Context, deviceID string, userID *uuid.UUID, since *time.Time) ([]domainfollow.Notification, error) {
 	if err := domainfollow.ValidateDeviceID(deviceID); err != nil {
 		return nil, err
 	}
@@ -214,6 +205,7 @@ func (s *Service) Notifications(ctx context.Context, deviceID string, since *tim
 
 	candidates, err := s.follows.Notifications(ctx, ports.NotificationQuery{
 		DeviceID:       deviceID,
+		UserID:         userID,
 		Since:          from,
 		Limit:          defaultNotificationLimit,
 		AreaSeverities: domainreport.SevereSeverities(),

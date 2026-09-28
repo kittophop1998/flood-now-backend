@@ -23,12 +23,12 @@ func NewFollowRepository(db *sql.DB) *FollowRepository {
 	return &FollowRepository{db: db}
 }
 
-const followColumns = `f.id, f.device_id, f.kind, f.report_id, f.latitude, f.longitude, f.radius_m, f.created_at,
+const followColumns = `f.id, COALESCE(f.device_id, ''), f.user_id, f.kind, f.report_id, f.latitude, f.longitude, f.radius_m, f.created_at,
 	f.name, f.icon, f.preferred_vehicle, f.notify, f.updated_at`
 
 func scanFollow(row rowScanner, extra ...any) (*follow.Follow, error) {
 	var f follow.Follow
-	dest := []any{&f.ID, &f.DeviceID, &f.Kind, &f.ReportID, &f.Latitude, &f.Longitude, &f.RadiusM, &f.CreatedAt,
+	dest := []any{&f.ID, &f.DeviceID, &f.UserID, &f.Kind, &f.ReportID, &f.Latitude, &f.Longitude, &f.RadiusM, &f.CreatedAt,
 		&f.Name, &f.Icon, &f.PreferredVehicle, &f.Notify, &f.UpdatedAt}
 	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
@@ -85,10 +85,10 @@ func (repo *FollowRepository) FindReportFollow(ctx context.Context, deviceID str
 
 func (repo *FollowRepository) Create(ctx context.Context, f *follow.Follow) error {
 	_, err := repo.db.ExecContext(ctx, `
-		INSERT INTO follows (id, device_id, kind, report_id, latitude, longitude, radius_m, created_at,
+		INSERT INTO follows (id, device_id, user_id, kind, report_id, latitude, longitude, radius_m, created_at,
 			name, icon, preferred_vehicle, notify, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-		f.ID, f.DeviceID, f.Kind, f.ReportID, f.Latitude, f.Longitude, f.RadiusM, f.CreatedAt,
+		VALUES ($1,NULLIF($2, ''),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		f.ID, f.DeviceID, f.UserID, f.Kind, f.ReportID, f.Latitude, f.Longitude, f.RadiusM, f.CreatedAt,
 		f.Name, f.Icon, f.PreferredVehicle, f.Notify, f.UpdatedAt,
 	)
 	if err != nil {
@@ -109,8 +109,16 @@ func (repo *FollowRepository) Delete(ctx context.Context, deviceID string, id uu
 	return n > 0, nil
 }
 
-func (repo *FollowRepository) GetPlace(ctx context.Context, deviceID string, id uuid.UUID) (*follow.Follow, error) {
-	row := repo.db.QueryRowContext(ctx, `SELECT `+followColumns+` FROM follows f WHERE f.id = $1 AND f.device_id = $2 AND f.kind = 'place'`, id, deviceID)
+func (repo *FollowRepository) CountPlaces(ctx context.Context, userID uuid.UUID) (int, error) {
+	var n int
+	if err := repo.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM follows WHERE user_id = $1 AND kind = 'place'`, userID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count saved places: %w", err)
+	}
+	return n, nil
+}
+
+func (repo *FollowRepository) GetPlace(ctx context.Context, userID, id uuid.UUID) (*follow.Follow, error) {
+	row := repo.db.QueryRowContext(ctx, `SELECT `+followColumns+` FROM follows f WHERE f.id = $1 AND f.user_id = $2 AND f.kind = 'place'`, id, userID)
 	f, err := scanFollow(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -125,11 +133,40 @@ func (repo *FollowRepository) UpdatePlace(ctx context.Context, f *follow.Follow)
 	_, err := repo.db.ExecContext(ctx, `
 		UPDATE follows SET name = $1, icon = $2, latitude = $3, longitude = $4, radius_m = $5,
 			preferred_vehicle = $6, notify = $7, updated_at = $8
-		WHERE id = $9 AND device_id = $10 AND kind = 'place'`,
-		f.Name, f.Icon, f.Latitude, f.Longitude, f.RadiusM, f.PreferredVehicle, f.Notify, f.UpdatedAt, f.ID, f.DeviceID,
+		WHERE id = $9 AND user_id = $10 AND kind = 'place'`,
+		f.Name, f.Icon, f.Latitude, f.Longitude, f.RadiusM, f.PreferredVehicle, f.Notify, f.UpdatedAt, f.ID, f.UserID,
 	)
 	if err != nil {
 		return fmt.Errorf("update saved place: %w", err)
+	}
+	return nil
+}
+
+func (repo *FollowRepository) DeletePlace(ctx context.Context, userID, id uuid.UUID) (bool, error) {
+	res, err := repo.db.ExecContext(ctx, `DELETE FROM follows WHERE id = $1 AND user_id = $2 AND kind = 'place'`, id, userID)
+	if err != nil {
+		return false, fmt.Errorf("delete saved place: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete saved place: %w", err)
+	}
+	return n > 0, nil
+}
+
+// ClaimDevicePlaces hands a device's ownerless (pre-accounts) saved places
+// to a user, oldest first, without taking the user past max places.
+func (repo *FollowRepository) ClaimDevicePlaces(ctx context.Context, deviceID string, userID uuid.UUID, max int) error {
+	_, err := repo.db.ExecContext(ctx, `
+		UPDATE follows SET user_id = $2, updated_at = now()
+		WHERE id IN (
+			SELECT id FROM follows
+			WHERE kind = 'place' AND device_id = $1 AND user_id IS NULL
+			ORDER BY created_at
+			LIMIT GREATEST(0, $3 - (SELECT COUNT(*) FROM follows WHERE kind = 'place' AND user_id = $2))
+		)`, deviceID, userID, max)
+	if err != nil {
+		return fmt.Errorf("claim device saved places: %w", err)
 	}
 	return nil
 }
@@ -138,9 +175,9 @@ func (repo *FollowRepository) UpdatePlace(ctx context.Context, f *follow.Follow)
 // watch radius and picks each area's top incident with LATERAL queries
 // (bbox prefilter on the report lat/lng index, then exact haversine),
 // instead of queries per place.
-func (repo *FollowRepository) PlaceSummaries(ctx context.Context, deviceID string, severe []report.Severity, facilities []report.Type, now time.Time) ([]follow.PlaceWithSummary, error) {
+func (repo *FollowRepository) PlaceSummaries(ctx context.Context, userID uuid.UUID, severe []report.Severity, facilities []report.Type, now time.Time) ([]follow.PlaceWithSummary, error) {
 	var b queryBuilder
-	device := b.arg(deviceID)
+	owner := b.arg(userID)
 	nowPH := b.arg(now)
 	sevPH := b.arg(severityStrings(severe))
 	facPH := b.arg(typeStrings(facilities))
@@ -170,7 +207,7 @@ func (repo *FollowRepository) PlaceSummaries(ctx context.Context, deviceID strin
 				distance_m ASC
 			LIMIT 1
 		) top ON true
-		WHERE f.device_id = ` + device + ` AND f.kind = 'place'
+		WHERE f.user_id = ` + owner + ` AND f.kind = 'place'
 		ORDER BY f.created_at`
 	rows, err := repo.db.QueryContext(ctx, query, b.args...)
 	if err != nil {
@@ -203,15 +240,16 @@ func (repo *FollowRepository) PlaceSummaries(ctx context.Context, deviceID strin
 	return out, rows.Err()
 }
 
-// Notifications matches report events against the device's follows:
-// report follows see every event of their report after the follow began;
-// area follows see "created" events inside their radius at the given
-// severities or categories; saved places with notifications on also see
-// "reopened".
+// Notifications matches report events against the device's follows and the
+// signed-in user's saved places: report follows see every event of their
+// report after the follow began; area follows see "created" events inside
+// their radius at the given severities or categories; saved places with
+// notifications on also see "reopened".
 // Events the device caused itself and hidden reports are skipped.
 func (repo *FollowRepository) Notifications(ctx context.Context, q ports.NotificationQuery) ([]ports.NotificationCandidate, error) {
 	var b queryBuilder
 	device := b.arg(q.DeviceID)
+	owner := b.arg(q.UserID)
 	since := b.arg(q.Since)
 	sevList := make([]string, len(q.AreaSeverities))
 	for i, s := range q.AreaSeverities {
@@ -236,7 +274,8 @@ func (repo *FollowRepository) Notifications(ctx context.Context, q ports.Notific
 		FROM follows f
 		JOIN report_events e ON e.created_at > ` + since + ` AND e.created_at >= f.created_at
 		JOIN reports r ON r.id = e.report_id
-		WHERE f.device_id = ` + device + ` AND e.device_id IS DISTINCT FROM f.device_id AND r.hidden_at IS NULL AND (
+		WHERE ((f.kind <> 'place' AND f.device_id = ` + device + `) OR (f.kind = 'place' AND f.user_id = ` + owner + `::uuid))
+			AND e.device_id IS DISTINCT FROM ` + device + ` AND r.hidden_at IS NULL AND (
 			(f.kind = 'report' AND e.report_id = f.report_id)
 			OR (f.kind = 'area' AND e.kind = 'created' AND ` + sevIn + ` AND ` +
 		distanceSQL("f.latitude", "f.longitude") + ` <= f.radius_m)

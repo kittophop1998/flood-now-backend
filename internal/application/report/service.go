@@ -46,11 +46,17 @@ func NewService(repo ports.ReportRepository, clock ports.Clock, policy domainrep
 	return &Service{repo: repo, clock: clock, policy: policy}
 }
 
-// Create stores a new report. With a ClientID (offline queue) the call is
-// idempotent: re-sending returns the report created the first time.
-func (s *Service) Create(ctx context.Context, in domainreport.NewReportInput) (*domainreport.ReportWithStats, error) {
+// Create stores a new report. userID is the signed-in reporter, nil for a
+// guest: guests may only report guest-reportable (safety-critical)
+// categories — enforced here, whatever the client shows. With a ClientID
+// (offline queue) the call is idempotent: re-sending returns the report
+// created the first time.
+func (s *Service) Create(ctx context.Context, in domainreport.NewReportInput, userID *uuid.UUID) (*domainreport.ReportWithStats, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
+	}
+	if userID == nil && !in.Type.GuestReportable() {
+		return nil, apperr.Unauthorized("sign in to report this category")
 	}
 	in = in.Normalized()
 	if in.ClientID != nil {
@@ -85,6 +91,7 @@ func (s *Service) Create(ctx context.Context, in domainreport.NewReportInput) (*
 		StaleAt:        staleAt,
 		ExpiresAt:      expiresAt,
 		ClientID:       in.ClientID,
+		UserID:         userID,
 	}
 
 	if err := s.repo.Create(ctx, r); err != nil {
@@ -348,21 +355,17 @@ func (s *Service) Confirm(ctx context.Context, reportID uuid.UUID, in domainrepo
 	return r, nil
 }
 
-// React sets (or switches) a device's like/support reaction on a report.
-// Reactions are social feedback only — this never touches severity,
+// React sets (or switches) a signed-in user's like/support reaction on a
+// report. Reactions are social feedback only — this never touches severity,
 // freshness, confirmation counts, route safety or moderation state.
-func (s *Service) React(ctx context.Context, reportID uuid.UUID, in domainreport.NewReactionInput) (*domainreport.ReportWithStats, error) {
+func (s *Service) React(ctx context.Context, reportID, userID uuid.UUID, in domainreport.NewReactionInput) (*domainreport.ReportWithStats, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
 	}
-	existing, err := s.repo.GetByID(ctx, reportID)
-	if err != nil {
+	if _, err := s.Get(ctx, reportID); err != nil {
 		return nil, err
 	}
-	if existing == nil || existing.HiddenAt != nil {
-		return nil, apperr.NotFound("report not found")
-	}
-	r, err := s.repo.React(ctx, reportID, in.DeviceID, in.Type)
+	r, err := s.repo.React(ctx, reportID, userID, in.Type)
 	if err != nil {
 		return nil, err
 	}
@@ -372,19 +375,12 @@ func (s *Service) React(ctx context.Context, reportID uuid.UUID, in domainreport
 	return r, nil
 }
 
-// RemoveReaction clears a device's reaction to a report, if any.
-func (s *Service) RemoveReaction(ctx context.Context, reportID uuid.UUID, deviceID string) (*domainreport.ReportWithStats, error) {
-	if !domainreport.ValidDeviceID(deviceID) {
-		return nil, apperr.Validation("reaction is invalid", map[string]string{"device_id": "must be between 8 and 128 characters"})
-	}
-	existing, err := s.repo.GetByID(ctx, reportID)
-	if err != nil {
+// RemoveReaction clears a user's reaction to a report, if any.
+func (s *Service) RemoveReaction(ctx context.Context, reportID, userID uuid.UUID) (*domainreport.ReportWithStats, error) {
+	if _, err := s.Get(ctx, reportID); err != nil {
 		return nil, err
 	}
-	if existing == nil || existing.HiddenAt != nil {
-		return nil, apperr.NotFound("report not found")
-	}
-	r, err := s.repo.RemoveReaction(ctx, reportID, deviceID)
+	r, err := s.repo.RemoveReaction(ctx, reportID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -392,6 +388,11 @@ func (s *Service) RemoveReaction(ctx context.Context, reportID uuid.UUID, device
 		return nil, apperr.NotFound("report not found")
 	}
 	return r, nil
+}
+
+// MyReaction is the user's current reaction to a report (nil if none).
+func (s *Service) MyReaction(ctx context.Context, reportID, userID uuid.UUID) (*domainreport.ReactionType, error) {
+	return s.repo.MyReaction(ctx, reportID, userID)
 }
 
 func clampLimit(v, def, max int) int {

@@ -24,7 +24,7 @@ func (c *fakeClock) Now() time.Time { return c.now }
 type fakeRepo struct {
 	reports    map[uuid.UUID]*domainreport.ReportWithStats
 	votes      map[uuid.UUID]map[string]domainreport.ConfirmationStatus
-	reactions  map[uuid.UUID]map[string]domainreport.ReactionType
+	reactions  map[uuid.UUID]map[uuid.UUID]domainreport.ReactionType
 	lastList   ports.ReportFilter
 	lastNearby ports.NearbyFilter
 	listResult []domainreport.ReportWithStats
@@ -37,7 +37,7 @@ func newFakeRepo() *fakeRepo {
 	return &fakeRepo{
 		reports:   map[uuid.UUID]*domainreport.ReportWithStats{},
 		votes:     map[uuid.UUID]map[string]domainreport.ConfirmationStatus{},
-		reactions: map[uuid.UUID]map[string]domainreport.ReactionType{},
+		reactions: map[uuid.UUID]map[uuid.UUID]domainreport.ReactionType{},
 	}
 }
 
@@ -108,27 +108,34 @@ func (f *fakeRepo) recount(reportID uuid.UUID) {
 	}
 }
 
-func (f *fakeRepo) React(ctx context.Context, reportID uuid.UUID, deviceID string, t domainreport.ReactionType) (*domainreport.ReportWithStats, error) {
+func (f *fakeRepo) React(ctx context.Context, reportID, userID uuid.UUID, t domainreport.ReactionType) (*domainreport.ReportWithStats, error) {
 	if _, ok := f.reports[reportID]; !ok {
 		return nil, nil
 	}
 	if f.reactions[reportID] == nil {
-		f.reactions[reportID] = map[string]domainreport.ReactionType{}
+		f.reactions[reportID] = map[uuid.UUID]domainreport.ReactionType{}
 	}
-	f.reactions[reportID][deviceID] = t
+	f.reactions[reportID][userID] = t
 	f.recount(reportID)
 	cp := *f.reports[reportID]
 	return &cp, nil
 }
 
-func (f *fakeRepo) RemoveReaction(ctx context.Context, reportID uuid.UUID, deviceID string) (*domainreport.ReportWithStats, error) {
+func (f *fakeRepo) RemoveReaction(ctx context.Context, reportID, userID uuid.UUID) (*domainreport.ReportWithStats, error) {
 	if _, ok := f.reports[reportID]; !ok {
 		return nil, nil
 	}
-	delete(f.reactions[reportID], deviceID)
+	delete(f.reactions[reportID], userID)
 	f.recount(reportID)
 	cp := *f.reports[reportID]
 	return &cp, nil
+}
+
+func (f *fakeRepo) MyReaction(ctx context.Context, reportID, userID uuid.UUID) (*domainreport.ReactionType, error) {
+	if t, ok := f.reactions[reportID][userID]; ok {
+		return &t, nil
+	}
+	return nil, nil
 }
 
 func (f *fakeRepo) Confirm(ctx context.Context, p ports.ConfirmParams) (*domainreport.ReportWithStats, error) {
@@ -200,12 +207,17 @@ const deviceA = "12345678-aaaa-bbbb-cccc-dddddddddddd"
 const deviceB = "87654321-aaaa-bbbb-cccc-dddddddddddd"
 const deviceC = "abcdefab-aaaa-bbbb-cccc-dddddddddddd"
 
+var (
+	userA = uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	userB = uuid.MustParse("22222222-2222-4222-8222-222222222222")
+)
+
 var t0 = time.Date(2026, 9, 25, 8, 0, 0, 0, time.UTC)
 
 func TestServiceCreateSetsLifecycleWindowByCategory(t *testing.T) {
 	svc, _, _ := newTestService(t0)
 
-	flood, err := svc.Create(context.Background(), validInput())
+	flood, err := svc.Create(context.Background(), validInput(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -218,7 +230,7 @@ func TestServiceCreateSetsLifecycleWindowByCategory(t *testing.T) {
 
 	in := validInput()
 	in.Type = domainreport.TypeShelter
-	shelter, err := svc.Create(context.Background(), in)
+	shelter, err := svc.Create(context.Background(), in, &userA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -235,7 +247,7 @@ func TestServiceCreateNormalizesIrrelevantFields(t *testing.T) {
 	in.WaterDepth = &d
 	in.Passability = &domainreport.Passability{Walk: "passable", Motorcycle: "passable", Sedan: "passable", SUVPickup: "passable"}
 
-	r, err := svc.Create(context.Background(), in)
+	r, err := svc.Create(context.Background(), in, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -252,7 +264,7 @@ func TestServiceCreateRejectsInvalidInput(t *testing.T) {
 
 	in := validInput()
 	in.Type = "bogus"
-	_, err := svc.Create(context.Background(), in)
+	_, err := svc.Create(context.Background(), in, nil)
 	assertCode(t, err, apperr.CodeValidation)
 }
 
@@ -261,7 +273,7 @@ func TestServiceCreateAcceptsSituationCategories(t *testing.T) {
 	for _, ty := range []domainreport.Type{domainreport.TypeFlooded, domainreport.TypeAccident} {
 		in := validInput()
 		in.Type = ty
-		r, err := svc.Create(context.Background(), in)
+		r, err := svc.Create(context.Background(), in, nil)
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", ty, err)
 		}
@@ -276,7 +288,7 @@ func TestServiceCreateRejectsSOSOnlyCategories(t *testing.T) {
 	for _, ty := range []domainreport.Type{domainreport.TypeVehicleStalled, domainreport.TypeHelpNeeded, domainreport.TypeOther} {
 		in := validInput()
 		in.Type = ty
-		_, err := svc.Create(context.Background(), in)
+		_, err := svc.Create(context.Background(), in, nil)
 		assertCode(t, err, apperr.CodeValidation)
 		var appErr *apperr.Error
 		if errors.As(err, &appErr) && appErr.Fields["type"] == "" {
@@ -324,7 +336,7 @@ func TestServiceGetNotFound(t *testing.T) {
 
 func TestServiceConfirmStillActiveRestartsFreshness(t *testing.T) {
 	svc, _, clock := newTestService(t0)
-	created, _ := svc.Create(context.Background(), validInput())
+	created, _ := svc.Create(context.Background(), validInput(), nil)
 
 	clock.now = t0.Add(3 * time.Hour) // past stale_at: report reads possibly_stale
 	if created.Status(clock.now) != domainreport.StatusPossiblyStale {
@@ -345,7 +357,7 @@ func TestServiceConfirmStillActiveRestartsFreshness(t *testing.T) {
 
 func TestServiceConfirmClearedResolvesOnlyAtThreshold(t *testing.T) {
 	svc, _, _ := newTestService(t0)
-	created, _ := svc.Create(context.Background(), validInput())
+	created, _ := svc.Create(context.Background(), validInput(), nil)
 	originalExpiry := created.ExpiresAt
 
 	one, err := svc.Confirm(context.Background(), created.ID, domainreport.NewConfirmationInput{DeviceID: deviceA, Status: domainreport.StatusCleared})
@@ -462,11 +474,11 @@ func TestCreateWithClientIDIsIdempotent(t *testing.T) {
 	id := "offline-queue-0001"
 	in.ClientID = &id
 
-	first, err := svc.Create(context.Background(), in)
+	first, err := svc.Create(context.Background(), in, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	second, err := svc.Create(context.Background(), in)
+	second, err := svc.Create(context.Background(), in, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -477,13 +489,13 @@ func TestCreateWithClientIDIsIdempotent(t *testing.T) {
 	bad := validInput()
 	short := "x"
 	bad.ClientID = &short
-	_, err = svc.Create(context.Background(), bad)
+	_, err = svc.Create(context.Background(), bad, nil)
 	assertCode(t, err, apperr.CodeValidation)
 }
 
 func TestHiddenReportsAreNotFoundAndCannotBeConfirmed(t *testing.T) {
 	svc, repo, _ := newTestService(t0)
-	r, _ := svc.Create(context.Background(), validInput())
+	r, _ := svc.Create(context.Background(), validInput(), nil)
 	hiddenAt := t0
 	repo.reports[r.ID].HiddenAt = &hiddenAt
 
@@ -491,17 +503,17 @@ func TestHiddenReportsAreNotFoundAndCannotBeConfirmed(t *testing.T) {
 	assertCode(t, err, apperr.CodeNotFound)
 	_, err = svc.Confirm(context.Background(), r.ID, domainreport.NewConfirmationInput{DeviceID: deviceA, Status: domainreport.StatusCleared})
 	assertCode(t, err, apperr.CodeNotFound)
-	_, err = svc.React(context.Background(), r.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike})
+	_, err = svc.React(context.Background(), r.ID, userA, domainreport.NewReactionInput{Type: domainreport.ReactionLike})
 	assertCode(t, err, apperr.CodeNotFound)
-	_, err = svc.RemoveReaction(context.Background(), r.ID, deviceA)
+	_, err = svc.RemoveReaction(context.Background(), r.ID, userA)
 	assertCode(t, err, apperr.CodeNotFound)
 }
 
 func TestServiceReactCreatesAndSwitches(t *testing.T) {
 	svc, _, _ := newTestService(t0)
-	created, _ := svc.Create(context.Background(), validInput())
+	created, _ := svc.Create(context.Background(), validInput(), nil)
 
-	liked, err := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike})
+	liked, err := svc.React(context.Background(), created.ID, userA, domainreport.NewReactionInput{Type: domainreport.ReactionLike})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -509,31 +521,31 @@ func TestServiceReactCreatesAndSwitches(t *testing.T) {
 		t.Fatalf("expected 1 like/0 support, got %d/%d", liked.LikeCount, liked.SupportCount)
 	}
 
-	// Same device reacting again with the same type stays at one reaction.
-	again, _ := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike})
+	// Same user reacting again with the same type stays at one reaction.
+	again, _ := svc.React(context.Background(), created.ID, userA, domainreport.NewReactionInput{Type: domainreport.ReactionLike})
 	if again.LikeCount != 1 {
-		t.Errorf("repeat like from one device must not count twice, got %d", again.LikeCount)
+		t.Errorf("repeat like from one user must not count twice, got %d", again.LikeCount)
 	}
 
 	// Switching to support decrements like and increments support.
-	switched, _ := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionSupport})
+	switched, _ := svc.React(context.Background(), created.ID, userA, domainreport.NewReactionInput{Type: domainreport.ReactionSupport})
 	if switched.LikeCount != 0 || switched.SupportCount != 1 {
 		t.Errorf("expected switch to 0 like/1 support, got %d/%d", switched.LikeCount, switched.SupportCount)
 	}
 
-	// A second device's own reaction is independent.
-	both, _ := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceB, Type: domainreport.ReactionLike})
+	// A second user's own reaction is independent.
+	both, _ := svc.React(context.Background(), created.ID, userB, domainreport.NewReactionInput{Type: domainreport.ReactionLike})
 	if both.LikeCount != 1 || both.SupportCount != 1 {
-		t.Errorf("expected 1 like/1 support across two devices, got %d/%d", both.LikeCount, both.SupportCount)
+		t.Errorf("expected 1 like/1 support across two users, got %d/%d", both.LikeCount, both.SupportCount)
 	}
 }
 
 func TestServiceRemoveReactionTogglesOff(t *testing.T) {
 	svc, _, _ := newTestService(t0)
-	created, _ := svc.Create(context.Background(), validInput())
-	svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike}) //nolint:errcheck
+	created, _ := svc.Create(context.Background(), validInput(), nil)
+	svc.React(context.Background(), created.ID, userA, domainreport.NewReactionInput{Type: domainreport.ReactionLike}) //nolint:errcheck
 
-	cleared, err := svc.RemoveReaction(context.Background(), created.ID, deviceA)
+	cleared, err := svc.RemoveReaction(context.Background(), created.ID, userA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -542,7 +554,7 @@ func TestServiceRemoveReactionTogglesOff(t *testing.T) {
 	}
 
 	// Removing again (no reaction left) is a harmless no-op.
-	again, err := svc.RemoveReaction(context.Background(), created.ID, deviceA)
+	again, err := svc.RemoveReaction(context.Background(), created.ID, userA)
 	if err != nil || again.LikeCount != 0 {
 		t.Errorf("expected idempotent removal, got count=%d err=%v", again.LikeCount, err)
 	}
@@ -550,23 +562,18 @@ func TestServiceRemoveReactionTogglesOff(t *testing.T) {
 
 func TestServiceReactValidatesInput(t *testing.T) {
 	svc, _, _ := newTestService(t0)
-	created, _ := svc.Create(context.Background(), validInput())
+	created, _ := svc.Create(context.Background(), validInput(), nil)
 
-	_, err := svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: deviceA, Type: "love"})
+	_, err := svc.React(context.Background(), created.ID, userA, domainreport.NewReactionInput{Type: "love"})
 	assertCode(t, err, apperr.CodeValidation)
 
-	_, err = svc.React(context.Background(), created.ID, domainreport.NewReactionInput{DeviceID: "short", Type: domainreport.ReactionLike})
-	assertCode(t, err, apperr.CodeValidation)
-
-	_, err = svc.RemoveReaction(context.Background(), created.ID, "short")
-	assertCode(t, err, apperr.CodeValidation)
 }
 
 func TestServiceReactUnknownReportNotFound(t *testing.T) {
 	svc, _, _ := newTestService(t0)
-	_, err := svc.React(context.Background(), uuid.New(), domainreport.NewReactionInput{DeviceID: deviceA, Type: domainreport.ReactionLike})
+	_, err := svc.React(context.Background(), uuid.New(), userA, domainreport.NewReactionInput{Type: domainreport.ReactionLike})
 	assertCode(t, err, apperr.CodeNotFound)
-	_, err = svc.RemoveReaction(context.Background(), uuid.New(), deviceA)
+	_, err = svc.RemoveReaction(context.Background(), uuid.New(), userA)
 	assertCode(t, err, apperr.CodeNotFound)
 }
 
@@ -592,7 +599,7 @@ func TestAggregateValidatesAndSizesCellsByZoom(t *testing.T) {
 
 func TestServiceConfirmWithConditionUpdate(t *testing.T) {
 	svc, repo, clock := newTestService(t0)
-	created, _ := svc.Create(context.Background(), validInput())
+	created, _ := svc.Create(context.Background(), validInput(), nil)
 	clock.now = t0.Add(time.Hour)
 
 	sev := domainreport.SeverityModerate
@@ -625,7 +632,7 @@ func TestServiceConfirmUpdateDropsFieldsOutsideCategory(t *testing.T) {
 	svc, repo, _ := newTestService(t0)
 	in := validInput()
 	in.Type = domainreport.TypePowerOutage
-	created, _ := svc.Create(context.Background(), in)
+	created, _ := svc.Create(context.Background(), in, nil)
 
 	depth := domainreport.WaterDepthKnee
 	pass := &domainreport.Passability{Walk: domainreport.PassImpassable, Motorcycle: domainreport.PassUnknown, Sedan: domainreport.PassUnknown, SUVPickup: domainreport.PassUnknown}
@@ -643,7 +650,7 @@ func TestServiceConfirmUpdateDropsFieldsOutsideCategory(t *testing.T) {
 
 func TestServiceConfirmUpdateValidation(t *testing.T) {
 	svc, _, _ := newTestService(t0)
-	created, _ := svc.Create(context.Background(), validInput())
+	created, _ := svc.Create(context.Background(), validInput(), nil)
 
 	sev := domainreport.SeverityHigh
 	_, err := svc.Confirm(context.Background(), created.ID, domainreport.NewConfirmationInput{
@@ -664,7 +671,7 @@ func TestServiceConfirmUpdateDetailsFollowTheCategory(t *testing.T) {
 	in := validInput()
 	in.Type = domainreport.TypeAccident
 	in.Details = domainreport.Details{"lanes_blocked": "one"}
-	created, err := svc.Create(context.Background(), in)
+	created, err := svc.Create(context.Background(), in, nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -703,5 +710,50 @@ func TestServiceNearbyPassesSeverityAndFreshnessFilters(t *testing.T) {
 	f := repo.lastNearby
 	if len(f.Types) != 2 || len(f.Severities) != 1 || f.UpdatedSince == nil || !f.UpdatedSince.Equal(since) || f.RadiusM != 3000 {
 		t.Errorf("nearby filter not passed through: %+v", f)
+	}
+}
+
+func TestGuestsMayOnlyReportGuestReportableCategories(t *testing.T) {
+	svc, repo, _ := newTestService(t0)
+	for _, ty := range domainreport.GuestReportableTypes() {
+		in := validInput()
+		in.Type = ty
+		if _, err := svc.Create(context.Background(), in, nil); err != nil {
+			t.Errorf("guest should be able to report %s: %v", ty, err)
+		}
+	}
+	for _, ty := range []domainreport.Type{domainreport.TypeConstruction, domainreport.TypeShelter, domainreport.TypeAidPoint} {
+		in := validInput()
+		in.Type = ty
+		_, err := svc.Create(context.Background(), in, nil)
+		assertCode(t, err, apperr.CodeUnauthorized)
+
+		r, err := svc.Create(context.Background(), in, &userA)
+		if err != nil {
+			t.Fatalf("signed-in user should report %s: %v", ty, err)
+		}
+		if r.UserID == nil || *r.UserID != userA {
+			t.Errorf("%s: report must be owned by the signed-in user", ty)
+		}
+	}
+	for id, r := range repo.reports {
+		if r.Type == domainreport.TypeConstruction && r.UserID == nil {
+			t.Errorf("guest construction report %s was stored", id)
+		}
+	}
+}
+
+func TestMyReactionIsPerUser(t *testing.T) {
+	svc, _, _ := newTestService(t0)
+	created, _ := svc.Create(context.Background(), validInput(), nil)
+	svc.React(context.Background(), created.ID, userA, domainreport.NewReactionInput{Type: domainreport.ReactionSupport}) //nolint:errcheck
+
+	mine, err := svc.MyReaction(context.Background(), created.ID, userA)
+	if err != nil || mine == nil || *mine != domainreport.ReactionSupport {
+		t.Fatalf("userA reaction = %v (err %v), want support", mine, err)
+	}
+	theirs, _ := svc.MyReaction(context.Background(), created.ID, userB)
+	if theirs != nil {
+		t.Errorf("userB has no reaction, got %v", *theirs)
 	}
 }

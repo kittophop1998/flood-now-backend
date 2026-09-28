@@ -17,9 +17,12 @@ import (
 	"floodnow-api/internal/adapters/outbound/gistda"
 	"floodnow-api/internal/adapters/outbound/postgres"
 	"floodnow-api/internal/adapters/outbound/routing"
+	"floodnow-api/internal/adapters/outbound/security"
 	"floodnow-api/internal/adapters/outbound/storage"
 	appannouncement "floodnow-api/internal/application/announcement"
+	appauth "floodnow-api/internal/application/auth"
 	appcctv "floodnow-api/internal/application/cctv"
+	appevent "floodnow-api/internal/application/event"
 	appfollow "floodnow-api/internal/application/follow"
 	appimagecleanup "floodnow-api/internal/application/imagecleanup"
 	appimportantplace "floodnow-api/internal/application/importantplace"
@@ -106,7 +109,10 @@ func run() error {
 	realClock := clock.Real{}
 	reportRepo := postgres.NewReportRepository(db)
 	reportService := appreport.NewService(reportRepo, realClock, policy)
-	followService := appfollow.NewService(postgres.NewFollowRepository(db), reportRepo, realClock)
+	followRepo := postgres.NewFollowRepository(db)
+	followService := appfollow.NewService(followRepo, reportRepo, realClock)
+	authService := appauth.NewService(postgres.NewUserRepository(db), followRepo, security.Bcrypt{}, realClock)
+	eventService := appevent.NewService(postgres.NewEventRepository(db), realClock)
 	placeService := appplace.NewService(geocoding.NewNominatim(cfg.GeocoderURL, cfg.GeocoderUserAgent))
 
 	presigner := storage.NewR2Presigner(cfg.R2AccountID, cfg.R2AccessKeyID, cfg.R2SecretAccessKey, cfg.R2Endpoint, cfg.R2Bucket)
@@ -183,6 +189,9 @@ func run() error {
 		ConfigHandler:         inboundhttp.NewConfigHandler(donationCfg, floodService != nil, cctvService != nil),
 		OfficialFloodHandler:  inboundhttp.NewOfficialFloodHandler(floodService),
 		CCTVHandler:           inboundhttp.NewCCTVHandler(cctvService),
+		AuthHandler:           inboundhttp.NewAuthHandler(authService),
+		EventHandler:          inboundhttp.NewEventHandler(eventService, realClock, cfg.ImageKitBaseURL, storage.ImageURL),
+		AuthService:           authService,
 		WebOrigin:             cfg.WebOrigin,
 		AdminToken:            cfg.AdminToken,
 	})

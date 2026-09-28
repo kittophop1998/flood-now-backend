@@ -10,6 +10,7 @@ import (
 
 	"floodnow-api/internal/domain/announcement"
 	"floodnow-api/internal/domain/cctv"
+	"floodnow-api/internal/domain/event"
 	"floodnow-api/internal/domain/follow"
 	"floodnow-api/internal/domain/importantplace"
 	"floodnow-api/internal/domain/moderation"
@@ -18,6 +19,7 @@ import (
 	"floodnow-api/internal/domain/report"
 	"floodnow-api/internal/domain/route"
 	"floodnow-api/internal/domain/sos"
+	"floodnow-api/internal/domain/user"
 )
 
 // Clock is the only indirection over time.Now(), kept because expiry
@@ -132,13 +134,15 @@ type ReportRepository interface {
 	Aggregate(ctx context.Context, filter AggregateFilter) ([]AggregateCell, error)
 	Confirm(ctx context.Context, params ConfirmParams) (*report.ReportWithStats, error)
 	Events(ctx context.Context, reportID uuid.UUID) ([]ReportEvent, error)
-	// React sets (creates or switches) a device's like/support reaction on a
+	// React sets (creates or switches) a user's like/support reaction on a
 	// report and returns the updated report; nil if the report doesn't exist.
-	React(ctx context.Context, reportID uuid.UUID, deviceID string, reactionType report.ReactionType) (*report.ReportWithStats, error)
-	// RemoveReaction clears a device's reaction, if any, and returns the
+	React(ctx context.Context, reportID, userID uuid.UUID, reactionType report.ReactionType) (*report.ReportWithStats, error)
+	// RemoveReaction clears a user's reaction, if any, and returns the
 	// updated report; nil if the report doesn't exist. Idempotent when the
-	// device had no reaction.
-	RemoveReaction(ctx context.Context, reportID uuid.UUID, deviceID string) (*report.ReportWithStats, error)
+	// user had no reaction.
+	RemoveReaction(ctx context.Context, reportID, userID uuid.UUID) (*report.ReportWithStats, error)
+	// MyReaction returns the user's current reaction to a report, or nil.
+	MyReaction(ctx context.Context, reportID, userID uuid.UUID) (*report.ReactionType, error)
 
 	// ImageCleanupCandidates returns reports with a non-null image_key whose
 	// lifecycle ended (resolved or expired) at or before cutoff, oldest
@@ -163,9 +167,11 @@ type ImageCleanupCandidate struct {
 	ExpiresAt  time.Time
 }
 
-// NotificationQuery selects report events relevant to a device's follows.
+// NotificationQuery selects report events relevant to a device's follows
+// and, when signed in, the user's saved places.
 type NotificationQuery struct {
 	DeviceID string
+	UserID   *uuid.UUID
 	Since    time.Time
 	Limit    int
 	// AreaSeverities limits area-follow matches to new reports this severe…
@@ -197,13 +203,19 @@ type FollowRepository interface {
 	Delete(ctx context.Context, deviceID string, id uuid.UUID, kinds ...follow.Kind) (bool, error)
 	Notifications(ctx context.Context, q NotificationQuery) ([]NotificationCandidate, error)
 
-	// Saved places (follows of kind "place").
-	GetPlace(ctx context.Context, deviceID string, id uuid.UUID) (*follow.Follow, error)
+	// Saved places (follows of kind "place"), private to the owning user.
+	CountPlaces(ctx context.Context, userID uuid.UUID) (int, error)
+	GetPlace(ctx context.Context, userID, id uuid.UUID) (*follow.Follow, error)
 	UpdatePlace(ctx context.Context, f *follow.Follow) error
-	// PlaceSummaries returns the device's saved places with the open, visible
+	// DeletePlace removes the place only if userID owns it; false otherwise.
+	DeletePlace(ctx context.Context, userID, id uuid.UUID) (bool, error)
+	// PlaceSummaries returns the user's saved places with the open, visible
 	// reports inside each watch radius counted in a single query, plus each
 	// area's top incident (facility categories never count as one).
-	PlaceSummaries(ctx context.Context, deviceID string, severe []report.Severity, facilities []report.Type, now time.Time) ([]follow.PlaceWithSummary, error)
+	PlaceSummaries(ctx context.Context, userID uuid.UUID, severe []report.Severity, facilities []report.Type, now time.Time) ([]follow.PlaceWithSummary, error)
+	// ClaimDevicePlaces moves places a device saved before accounts existed
+	// (no owner yet) to userID, oldest first, never beyond max in total.
+	ClaimDevicePlaces(ctx context.Context, deviceID string, userID uuid.UUID, max int) error
 }
 
 // RouteProvider asks an external routing engine for candidate routes. The
@@ -413,4 +425,42 @@ type FloodAreaProvider interface {
 // map move. Failures are UNAVAILABLE.
 type CCTVProvider interface {
 	Cameras(ctx context.Context) (*cctv.Catalog, error)
+}
+
+// UserRepository stores accounts and their sessions.
+type UserRepository interface {
+	// Create inserts u; CONFLICT *apperr.Error if the email is taken.
+	Create(ctx context.Context, u *user.User) error
+	// GetByEmail looks up a normalized email; nil if unknown.
+	GetByEmail(ctx context.Context, email string) (*user.User, error)
+	CreateSession(ctx context.Context, tokenHash string, userID uuid.UUID, createdAt, expiresAt time.Time) error
+	// UserBySession returns the session's user if it hasn't expired at now.
+	UserBySession(ctx context.Context, tokenHash string, now time.Time) (*user.User, error)
+	DeleteSession(ctx context.Context, tokenHash string) error
+}
+
+// PasswordHasher hashes and checks passwords (bcrypt adapter).
+type PasswordHasher interface {
+	Hash(password string) (string, error)
+	Compare(hash, password string) bool
+}
+
+// EventFilter selects community events that haven't ended at Now, inside
+// BBox when set, soonest first.
+type EventFilter struct {
+	BBox  *BBox
+	Now   time.Time
+	Limit int
+}
+
+type EventRepository interface {
+	List(ctx context.Context, filter EventFilter) ([]event.Event, error)
+	// ListByOwner returns the user's own events (any status), newest first.
+	ListByOwner(ctx context.Context, ownerID uuid.UUID, limit int) ([]event.Event, error)
+	// CountUpcomingByOwner counts the user's active events not ended at now.
+	CountUpcomingByOwner(ctx context.Context, ownerID uuid.UUID, now time.Time) (int, error)
+	Get(ctx context.Context, id uuid.UUID) (*event.Event, error)
+	Create(ctx context.Context, e *event.Event) error
+	Update(ctx context.Context, e *event.Event) error
+	Delete(ctx context.Context, id uuid.UUID) error
 }
