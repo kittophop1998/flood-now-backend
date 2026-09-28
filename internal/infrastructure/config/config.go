@@ -3,6 +3,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -16,7 +18,20 @@ import (
 type Config struct {
 	Port        string
 	DatabaseURL string
-	WebOrigin   string
+	// Production is APP_ENV=production (the default): secure session
+	// cookies, HTTPS only, https web origins. APP_ENV=development relaxes
+	// exactly those for http://localhost.
+	Production bool
+	// WebOrigins are the exact web-app origins (WEB_ORIGIN, comma-separated)
+	// allowed to make credentialed cross-origin calls and signed-in writes.
+	WebOrigins []string
+	// Session cookie (see docs/api-spec.md#accounts-auth).
+	SessionCookieName     string
+	SessionCookieSecure   bool
+	SessionCookieSameSite http.SameSite
+	// TrustedProxies (IPs/CIDRs) may set X-Forwarded-For/-Proto; nobody else's
+	// forwarding headers are believed.
+	TrustedProxies []string
 	// Report lifecycle timing (see domain/report.FreshnessPolicy).
 	ReportStaleAfter         time.Duration
 	ReportTTL                time.Duration
@@ -108,7 +123,6 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port:        getEnv("PORT", "4000"),
 		DatabaseURL: os.Getenv("DATABASE_URL"),
-		WebOrigin:   getEnv("WEB_ORIGIN", "http://localhost:3000"),
 
 		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
 		R2AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
@@ -136,6 +150,9 @@ func Load() (*Config, error) {
 
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
+	}
+	if err := loadWebSecurity(cfg); err != nil {
+		return nil, err
 	}
 
 	durations := []struct {
@@ -188,6 +205,125 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Private/loopback networks: where a platform's own edge proxy (e.g.
+// Railway's) reaches the container from. Public clients can't connect from
+// these, so their forwarding headers can't be forged from the internet.
+var defaultTrustedProxies = []string{
+	"127.0.0.0/8", "::1/128",
+	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7",
+}
+
+// loadWebSecurity reads the environment, web origins, session cookie and
+// trusted proxies. Unlike the optional layers it fails the boot: in
+// production an insecure cookie, a non-https or wildcard origin, or a
+// missing WEB_ORIGIN is refused rather than deployed.
+func loadWebSecurity(cfg *Config) error {
+	switch env := getEnv("APP_ENV", "production"); env {
+	case "production":
+		cfg.Production = true
+	case "development":
+	default:
+		return fmt.Errorf("APP_ENV must be production or development, got %q", env)
+	}
+
+	rawOrigins := os.Getenv("WEB_ORIGIN")
+	if rawOrigins == "" {
+		if cfg.Production {
+			return fmt.Errorf("WEB_ORIGIN is required in production (the web app's exact https origin)")
+		}
+		rawOrigins = "http://localhost:3000"
+	}
+	cfg.WebOrigins = nil
+	for _, raw := range strings.Split(rawOrigins, ",") {
+		origin, err := parseOrigin(strings.TrimSpace(raw))
+		if err != nil {
+			return fmt.Errorf("invalid WEB_ORIGIN: %w", err)
+		}
+		if cfg.Production && !strings.HasPrefix(origin, "https://") {
+			return fmt.Errorf("WEB_ORIGIN %q must be https in production", origin)
+		}
+		cfg.WebOrigins = append(cfg.WebOrigins, origin)
+	}
+
+	cfg.SessionCookieSecure = cfg.Production
+	if raw := os.Getenv("SESSION_COOKIE_SECURE"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return fmt.Errorf("invalid SESSION_COOKIE_SECURE %q", raw)
+		}
+		cfg.SessionCookieSecure = v
+	}
+	if cfg.Production && !cfg.SessionCookieSecure {
+		return fmt.Errorf("SESSION_COOKIE_SECURE=false is not allowed in production")
+	}
+
+	switch raw := strings.ToLower(getEnv("SESSION_COOKIE_SAMESITE", "strict")); raw {
+	case "strict":
+		cfg.SessionCookieSameSite = http.SameSiteStrictMode
+	case "lax":
+		cfg.SessionCookieSameSite = http.SameSiteLaxMode
+	case "none":
+		if !cfg.SessionCookieSecure {
+			return fmt.Errorf("SESSION_COOKIE_SAMESITE=none requires a Secure cookie")
+		}
+		cfg.SessionCookieSameSite = http.SameSiteNoneMode
+	default:
+		return fmt.Errorf("SESSION_COOKIE_SAMESITE must be strict, lax or none, got %q", raw)
+	}
+
+	// __Host- (Secure, Path=/, no Domain) pins the cookie to the API host.
+	// Browsers drop it over plain http, hence the unprefixed dev default.
+	defaultName := "floodnow_session"
+	if cfg.SessionCookieSecure {
+		defaultName = "__Host-floodnow_session"
+	}
+	cfg.SessionCookieName = getEnv("SESSION_COOKIE_NAME", defaultName)
+	if !validCookieName(cfg.SessionCookieName) {
+		return fmt.Errorf("invalid SESSION_COOKIE_NAME %q", cfg.SessionCookieName)
+	}
+	if (strings.HasPrefix(cfg.SessionCookieName, "__Host-") || strings.HasPrefix(cfg.SessionCookieName, "__Secure-")) && !cfg.SessionCookieSecure {
+		return fmt.Errorf("SESSION_COOKIE_NAME %q needs SESSION_COOKIE_SECURE=true", cfg.SessionCookieName)
+	}
+
+	cfg.TrustedProxies = defaultTrustedProxies
+	if raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); raw == "none" {
+		cfg.TrustedProxies = nil
+	} else if raw != "" {
+		cfg.TrustedProxies = nil
+		for _, p := range strings.Split(raw, ",") {
+			p = strings.TrimSpace(p)
+			if _, _, err := net.ParseCIDR(p); err != nil && net.ParseIP(p) == nil {
+				return fmt.Errorf("invalid TRUSTED_PROXIES entry %q (want an IP or CIDR)", p)
+			}
+			cfg.TrustedProxies = append(cfg.TrustedProxies, p)
+		}
+	}
+	return nil
+}
+
+// parseOrigin accepts exactly scheme://host[:port] (no wildcard, path,
+// query or credentials) and returns it lowercased, as browsers send Origin.
+func parseOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || strings.Contains(u.Host, "*") ||
+		u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("%q is not an exact http(s) origin", raw)
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host), nil
+}
+
+func validCookieName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r <= ' ' || r >= 0x7f || strings.ContainsRune(`()<>@,;:\"/[]?={}`, r) {
+			return false
+		}
+	}
+	return true
 }
 
 const defaultGISTDACacheTTL = 15 * time.Minute

@@ -173,6 +173,11 @@ func run() error {
 		cctvService = appcctv.NewService(dohtraffic.New(cfg.DOHCCTV.BaseURL, 20*time.Second, realClock), realClock, cfg.DOHCCTV.CacheTTL)
 	}
 
+	sessionCookie := inboundhttp.SessionCookie{Name: cfg.SessionCookieName, Secure: cfg.SessionCookieSecure, SameSite: cfg.SessionCookieSameSite}
+	if !cfg.Production {
+		log.Printf("APP_ENV=development: plain http allowed, session cookie Secure=%v", cfg.SessionCookieSecure)
+	}
+
 	presenter := inboundhttp.NewReportPresenter(realClock, cfg.ImageKitBaseURL, storage.ImageURL)
 
 	router := inboundhttp.NewRouter(inboundhttp.Deps{
@@ -189,10 +194,13 @@ func run() error {
 		ConfigHandler:         inboundhttp.NewConfigHandler(donationCfg, floodService != nil, cctvService != nil),
 		OfficialFloodHandler:  inboundhttp.NewOfficialFloodHandler(floodService),
 		CCTVHandler:           inboundhttp.NewCCTVHandler(cctvService),
-		AuthHandler:           inboundhttp.NewAuthHandler(authService),
+		AuthHandler:           inboundhttp.NewAuthHandler(authService, sessionCookie),
 		EventHandler:          inboundhttp.NewEventHandler(eventService, realClock, cfg.ImageKitBaseURL, storage.ImageURL),
 		AuthService:           authService,
-		WebOrigin:             cfg.WebOrigin,
+		SessionCookie:         sessionCookie,
+		WebOrigins:            cfg.WebOrigins,
+		RequireHTTPS:          cfg.Production,
+		TrustedProxies:        cfg.TrustedProxies,
 		AdminToken:            cfg.AdminToken,
 	})
 

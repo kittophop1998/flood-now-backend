@@ -101,28 +101,28 @@ func TestRegisterLoginAuthenticateLogout(t *testing.T) {
 	ctx := context.Background()
 	const device = "12345678-aaaa-bbbb-cccc-dddddddddddd"
 
-	s, err := svc.Register(ctx, user.RegisterInput{Email: " Somchai@Example.com ", Password: "longenough", DisplayName: " สมชาย "}, device)
+	s, err := svc.Register(ctx, user.RegisterInput{Email: " Somchai@Example.com ", Password: "longenough", DisplayName: " สมชาย "}, device, "")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if s.User.Email != "somchai@example.com" || s.User.DisplayName != "สมชาย" || s.Token == "" {
+	if s.User.Email != "somchai@example.com" || s.User.DisplayName != "สมชาย" || len(s.Token) < 43 || !s.ExpiresAt.Equal(clock.now.Add(user.SessionTTL)) {
 		t.Errorf("unexpected session: %+v", s.User)
 	}
 	if len(claims.claimed) != 1 || claims.claimed[0] != device {
 		t.Errorf("device's saved places should be claimed on sign-up, got %v", claims.claimed)
 	}
 
-	_, err = svc.Register(ctx, user.RegisterInput{Email: "somchai@example.com", Password: "longenough", DisplayName: "x"}, "")
+	_, err = svc.Register(ctx, user.RegisterInput{Email: "somchai@example.com", Password: "longenough", DisplayName: "x"}, "", "")
 	assertCode(t, err, apperr.CodeConflict)
-	_, err = svc.Register(ctx, user.RegisterInput{Email: "not-an-email", Password: "short", DisplayName: ""}, "")
+	_, err = svc.Register(ctx, user.RegisterInput{Email: "not-an-email", Password: "short", DisplayName: ""}, "", "")
 	assertCode(t, err, apperr.CodeValidation)
 
-	_, err = svc.Login(ctx, "somchai@example.com", "wrong-password", "")
+	_, err = svc.Login(ctx, "somchai@example.com", "wrong-password", "", "")
 	assertCode(t, err, apperr.CodeUnauthorized)
-	_, err = svc.Login(ctx, "nobody@example.com", "longenough", "")
+	_, err = svc.Login(ctx, "nobody@example.com", "longenough", "", "")
 	assertCode(t, err, apperr.CodeUnauthorized)
 
-	login, err := svc.Login(ctx, "SOMCHAI@example.com", "longenough", "")
+	login, err := svc.Login(ctx, "SOMCHAI@example.com", "longenough", "", "")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -144,5 +144,39 @@ func TestRegisterLoginAuthenticateLogout(t *testing.T) {
 	clock.now = clock.now.Add(user.SessionTTL + time.Minute)
 	if u, _ := svc.Authenticate(ctx, s.Token); u != nil {
 		t.Error("an expired session must not authenticate")
+	}
+}
+
+func TestLoginRotatesThePreviousSession(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)}
+	svc := appauth.NewService(newMemUsers(), &claimRecorder{}, plainHasher{}, clock)
+	ctx := context.Background()
+
+	first, err := svc.Register(ctx, user.RegisterInput{Email: "a@example.com", Password: "longenough", DisplayName: "A"}, "", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// Signing in again from the same browser replaces its session: the
+	// token held before (possibly planted by someone else) stops working.
+	second, err := svc.Login(ctx, "a@example.com", "longenough", "", first.Token)
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if second.Token == first.Token {
+		t.Fatal("login must issue a new token")
+	}
+	if u, _ := svc.Authenticate(ctx, first.Token); u != nil {
+		t.Error("the previous session must be revoked on login")
+	}
+	if u, _ := svc.Authenticate(ctx, second.Token); u == nil {
+		t.Error("the new session must authenticate")
+	}
+
+	// A failed login leaves the current session alone.
+	if _, err := svc.Login(ctx, "a@example.com", "wrong-password", "", second.Token); err == nil {
+		t.Fatal("wrong password must fail")
+	}
+	if u, _ := svc.Authenticate(ctx, second.Token); u == nil {
+		t.Error("a failed login must not revoke the current session")
 	}
 }

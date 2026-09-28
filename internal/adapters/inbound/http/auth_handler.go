@@ -2,7 +2,6 @@ package http
 
 import (
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,14 +16,20 @@ import (
 // ctxUserKey holds the signed-in *user.User on the Gin context.
 const ctxUserKey = "floodnow.user"
 
-// authMiddleware resolves "Authorization: Bearer <session token>" to a user.
-// With required, a missing/invalid/expired session is 401 UNAUTHORIZED; the
-// optional form lets guests through (an invalid token then counts as a
-// guest), so public endpoints never block anyone who isn't signed in.
-// Authorization itself (who may do what) stays in the application layer.
-func authMiddleware(svc *appauth.Service, required bool) gin.HandlerFunc {
+// authMiddleware resolves the session cookie (never a header or anything
+// else the client says about who it is) to a user. With required, a
+// missing/invalid/revoked/expired session is 401 UNAUTHORIZED; the optional
+// form lets guests through (an invalid cookie then counts as a guest), so
+// public endpoints never block anyone who isn't signed in.
+//
+// A signed-in state-changing request must also come from an allowlisted
+// origin and carry the session's CSRF token — checked here, before any
+// handler runs. A cookie-less guest request has nothing to forge and skips
+// both. Authorization itself (who may do what) stays in the application
+// layer.
+func authMiddleware(svc *appauth.Service, cookie SessionCookie, origins originSet, required bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+		token := cookie.token(c)
 		var u *user.User
 		if token != "" && svc != nil {
 			var err error
@@ -40,6 +45,17 @@ func authMiddleware(svc *appauth.Service, required bool) gin.HandlerFunc {
 			return
 		}
 		if u != nil {
+			if !isSafeMethod(c.Request.Method) {
+				err := origins.checkOrigin(c.Request)
+				if err == nil {
+					err = checkCSRF(token, c.GetHeader(csrfHeader))
+				}
+				if err != nil {
+					writeError(c, err)
+					c.Abort()
+					return
+				}
+			}
 			c.Set(ctxUserKey, u)
 		}
 		c.Next()
@@ -128,13 +144,14 @@ func rateLimit(l *rateLimiter, guestsOnly bool) gin.HandlerFunc {
 	}
 }
 
-// AuthHandler serves sign-up, sign-in, sign-out and the current account.
+// AuthHandler serves sign-up, sign-in, sign-out and the current session.
 type AuthHandler struct {
 	service *appauth.Service
+	cookie  SessionCookie
 }
 
-func NewAuthHandler(service *appauth.Service) *AuthHandler {
-	return &AuthHandler{service: service}
+func NewAuthHandler(service *appauth.Service, cookie SessionCookie) *AuthHandler {
+	return &AuthHandler{service: service, cookie: cookie}
 }
 
 type registerRequest struct {
@@ -161,18 +178,28 @@ type userResponse struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// sessionResponse answers sign-up/sign-in. The session token itself is only
+// in the HttpOnly cookie; the page gets the CSRF token to echo back.
 type sessionResponse struct {
-	Token     string       `json:"token"`
 	ExpiresIn int64        `json:"expires_in"`
 	User      userResponse `json:"user"`
+	CSRFToken string       `json:"csrf_token"`
+}
+
+// sessionStateResponse is GET /auth/session: a guest is user=null.
+type sessionStateResponse struct {
+	User      *userResponse `json:"user"`
+	CSRFToken *string       `json:"csrf_token"`
 }
 
 func toUserResponse(u user.User) userResponse {
 	return userResponse{ID: u.ID.String(), Email: u.Email, DisplayName: u.DisplayName, CreatedAt: u.CreatedAt.UTC()}
 }
 
-func toSessionResponse(s *appauth.Session) sessionResponse {
-	return sessionResponse{Token: s.Token, ExpiresIn: int64(user.SessionTTL.Seconds()), User: toUserResponse(s.User)}
+// startSession sets the new session's cookie and answers with its metadata.
+func (h *AuthHandler) startSession(c *gin.Context, status int, s *appauth.Session) {
+	h.cookie.set(c, s.Token, s.ExpiresAt, user.SessionTTL)
+	c.JSON(status, sessionResponse{ExpiresIn: int64(user.SessionTTL.Seconds()), User: toUserResponse(s.User), CSRFToken: csrfToken(s.Token)})
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
@@ -180,12 +207,12 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	s, err := h.service.Register(c.Request.Context(), user.RegisterInput{Email: req.Email, Password: req.Password, DisplayName: req.DisplayName}, req.DeviceID)
+	s, err := h.service.Register(c.Request.Context(), user.RegisterInput{Email: req.Email, Password: req.Password, DisplayName: req.DisplayName}, req.DeviceID, h.cookie.token(c))
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, toSessionResponse(s))
+	h.startSession(c, http.StatusCreated, s)
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
@@ -193,23 +220,45 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	s, err := h.service.Login(c.Request.Context(), req.Email, req.Password, req.DeviceID)
+	s, err := h.service.Login(c.Request.Context(), req.Email, req.Password, req.DeviceID, h.cookie.token(c))
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toSessionResponse(s))
+	h.startSession(c, http.StatusOK, s)
 }
 
+// Logout revokes the server-side session and clears the cookie. Behind
+// optionalAuth: a live session needs its CSRF token like any signed-in
+// write; with no live session there is nothing to revoke, so it just
+// clears the cookie (idempotent).
 func (h *AuthHandler) Logout(c *gin.Context) {
-	token := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
-	if err := h.service.Logout(c.Request.Context(), token); err != nil {
-		writeError(c, err)
-		return
+	if currentUser(c) != nil {
+		if err := h.service.Logout(c.Request.Context(), h.cookie.token(c)); err != nil {
+			writeError(c, err)
+			return
+		}
 	}
+	h.cookie.clear(c)
 	c.Status(http.StatusNoContent)
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"user": toUserResponse(*currentUser(c))})
+	c.JSON(http.StatusOK, gin.H{"user": toUserResponse(*currentUser(c)), "csrf_token": csrfToken(h.cookie.token(c))})
+}
+
+// Session tells the page who is signed in (the cookie is unreadable to it)
+// and hands it the CSRF token; a guest gets nulls, not a 401. A stale
+// cookie is cleared.
+func (h *AuthHandler) Session(c *gin.Context) {
+	u := currentUser(c)
+	if u == nil {
+		if h.cookie.token(c) != "" {
+			h.cookie.clear(c)
+		}
+		c.JSON(http.StatusOK, sessionStateResponse{})
+		return
+	}
+	res, csrf := toUserResponse(*u), csrfToken(h.cookie.token(c))
+	c.JSON(http.StatusOK, sessionStateResponse{User: &res, CSRFToken: &csrf})
 }

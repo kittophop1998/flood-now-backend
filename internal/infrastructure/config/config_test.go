@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,7 @@ func TestGISTDAConfig(t *testing.T) {
 
 func TestLoadBootsWithGISTDAMisconfigured(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("WEB_ORIGIN", "https://floodnow.example")
 	setGISTDAEnv(t, "true", "", "", "nope")
 	cfg, err := Load()
 	if err != nil {
@@ -95,6 +97,7 @@ func TestDOHCCTVConfig(t *testing.T) {
 
 func TestLoadBootsWithDOHCCTVMisconfigured(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("WEB_ORIGIN", "https://floodnow.example")
 	t.Setenv("DOH_CCTV_ENABLED", "true")
 	t.Setenv("DOH_CCTV_BASE_URL", "::bad::")
 	cfg, err := Load()
@@ -170,6 +173,7 @@ func TestR2CleanupConfig(t *testing.T) {
 
 func TestLoadBootsWithR2CleanupMisconfigured(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("WEB_ORIGIN", "https://floodnow.example")
 	t.Setenv("R2_CLEANUP_CRON", "garbage")
 	t.Setenv("R2_CLEANUP_BATCH_SIZE", "not-a-number")
 	cfg, err := Load()
@@ -179,4 +183,91 @@ func TestLoadBootsWithR2CleanupMisconfigured(t *testing.T) {
 	if cfg.R2Cleanup.Cron != defaultR2CleanupCron || cfg.R2Cleanup.BatchSize != defaultR2CleanupBatchSize || cfg.R2CleanupWarning == "" {
 		t.Errorf("r2cleanup = %+v warning = %q", cfg.R2Cleanup, cfg.R2CleanupWarning)
 	}
+}
+
+func TestWebSecurityConfig(t *testing.T) {
+	base := map[string]string{
+		"DATABASE_URL": "postgres://example", "APP_ENV": "", "WEB_ORIGIN": "https://floodnow.example",
+		"SESSION_COOKIE_NAME": "", "SESSION_COOKIE_SECURE": "", "SESSION_COOKIE_SAMESITE": "", "TRUSTED_PROXIES": "",
+	}
+	load := func(t *testing.T, env map[string]string) (*Config, error) {
+		t.Helper()
+		for k, v := range base {
+			t.Setenv(k, v)
+		}
+		for k, v := range env {
+			t.Setenv(k, v)
+		}
+		return Load()
+	}
+
+	t.Run("production defaults are strict", func(t *testing.T) {
+		cfg, err := load(t, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.Production || !cfg.SessionCookieSecure || cfg.SessionCookieSameSite != http.SameSiteStrictMode ||
+			cfg.SessionCookieName != "__Host-floodnow_session" || len(cfg.WebOrigins) != 1 || cfg.WebOrigins[0] != "https://floodnow.example" {
+			t.Errorf("unexpected production config: %+v", cfg)
+		}
+		if len(cfg.TrustedProxies) == 0 {
+			t.Error("production must trust the platform's private-network proxy by default")
+		}
+	})
+
+	t.Run("development allows http localhost", func(t *testing.T) {
+		cfg, err := load(t, map[string]string{"APP_ENV": "development", "WEB_ORIGIN": ""})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Production || cfg.SessionCookieSecure || cfg.SessionCookieName != "floodnow_session" || cfg.WebOrigins[0] != "http://localhost:3000" {
+			t.Errorf("unexpected development config: %+v", cfg)
+		}
+	})
+
+	t.Run("several exact origins", func(t *testing.T) {
+		cfg, err := load(t, map[string]string{"WEB_ORIGIN": "https://FloodNow.example/, https://staging.floodnow.example"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(cfg.WebOrigins, " ") != "https://floodnow.example https://staging.floodnow.example" {
+			t.Errorf("origins = %v", cfg.WebOrigins)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"missing origin in production", map[string]string{"WEB_ORIGIN": ""}, "WEB_ORIGIN is required"},
+		{"http origin in production", map[string]string{"WEB_ORIGIN": "http://floodnow.example"}, "must be https"},
+		{"wildcard origin", map[string]string{"WEB_ORIGIN": "*"}, "not an exact"},
+		{"wildcard subdomain", map[string]string{"WEB_ORIGIN": "https://*.floodnow.example"}, "not an exact"},
+		{"origin with a path", map[string]string{"WEB_ORIGIN": "https://floodnow.example/app"}, "not an exact"},
+		{"insecure cookie in production", map[string]string{"SESSION_COOKIE_SECURE": "false"}, "not allowed in production"},
+		{"samesite none without secure", map[string]string{"APP_ENV": "development", "SESSION_COOKIE_SAMESITE": "none"}, "requires a Secure"},
+		{"unknown samesite", map[string]string{"SESSION_COOKIE_SAMESITE": "loose"}, "SESSION_COOKIE_SAMESITE"},
+		{"__Host- without secure", map[string]string{"APP_ENV": "development", "SESSION_COOKIE_NAME": "__Host-x"}, "needs SESSION_COOKIE_SECURE"},
+		{"bad cookie name", map[string]string{"SESSION_COOKIE_NAME": "a;b"}, "SESSION_COOKIE_NAME"},
+		{"bad trusted proxy", map[string]string{"TRUSTED_PROXIES": "10.0.0.0/33"}, "TRUSTED_PROXIES"},
+		{"unknown env", map[string]string{"APP_ENV": "staging"}, "APP_ENV"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := load(t, tc.env); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want mention of %q", err, tc.want)
+			}
+		})
+	}
+
+	t.Run("trusted proxies can be narrowed or turned off", func(t *testing.T) {
+		cfg, err := load(t, map[string]string{"TRUSTED_PROXIES": "10.1.2.3, fd00::/8"})
+		if err != nil || strings.Join(cfg.TrustedProxies, " ") != "10.1.2.3 fd00::/8" {
+			t.Errorf("proxies = %v, err %v", cfg.TrustedProxies, err)
+		}
+		cfg, err = load(t, map[string]string{"TRUSTED_PROXIES": "none"})
+		if err != nil || cfg.TrustedProxies != nil {
+			t.Errorf("proxies = %v, err %v", cfg.TrustedProxies, err)
+		}
+	})
 }

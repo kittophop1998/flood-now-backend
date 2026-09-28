@@ -45,7 +45,7 @@ func newFloodRouter(service *appflood.Service) *gin.Engine {
 	return NewRouter(Deps{
 		ConfigHandler:        NewConfigHandler(nil, service != nil, false),
 		OfficialFloodHandler: NewOfficialFloodHandler(service),
-		WebOrigin:            "http://localhost:3000",
+		WebOrigins:           []string{"http://localhost:3000"},
 	})
 }
 

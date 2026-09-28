@@ -17,6 +17,12 @@ const (
 	CodeUnauthorized    Code = "UNAUTHORIZED"
 	CodeForbidden       Code = "FORBIDDEN"
 	CodeRateLimited     Code = "RATE_LIMITED"
+	// Cookie-session request forgery guards (HTTP adapter): a signed-in
+	// state-changing request without / with a wrong X-CSRF-Token, or from an
+	// origin that isn't the web app.
+	CodeCSRFTokenMissing Code = "CSRF_TOKEN_MISSING"
+	CodeCSRFTokenInvalid Code = "CSRF_TOKEN_INVALID"
+	CodeInvalidOrigin    Code = "INVALID_ORIGIN"
 )
 
 // Error is the single error type carried across layers. Handlers map it to
@@ -58,6 +64,12 @@ func Forbidden(message string) *Error {
 // RateLimited means the caller did the same thing too often; retry later.
 func RateLimited(message string) *Error {
 	return &Error{Code: CodeRateLimited, Message: message}
+}
+
+// Rejected builds one of the 403 request-forgery errors (CSRF_TOKEN_MISSING,
+// CSRF_TOKEN_INVALID, INVALID_ORIGIN).
+func Rejected(code Code, message string) *Error {
+	return &Error{Code: code, Message: message}
 }
 
 func PayloadTooLarge(message string) *Error {

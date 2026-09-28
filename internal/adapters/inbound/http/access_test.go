@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,12 @@ import (
 
 type accessUsers struct {
 	users    map[uuid.UUID]user.User
-	sessions map[string]uuid.UUID
+	sessions map[string]accessSession
+}
+
+type accessSession struct {
+	userID  uuid.UUID
+	expires time.Time
 }
 
 func (m *accessUsers) Create(_ context.Context, u *user.User) error {
@@ -48,16 +54,16 @@ func (m *accessUsers) GetByEmail(_ context.Context, email string) (*user.User, e
 	}
 	return nil, nil
 }
-func (m *accessUsers) CreateSession(_ context.Context, hash string, id uuid.UUID, _, _ time.Time) error {
-	m.sessions[hash] = id
+func (m *accessUsers) CreateSession(_ context.Context, hash string, id uuid.UUID, _, expires time.Time) error {
+	m.sessions[hash] = accessSession{id, expires}
 	return nil
 }
-func (m *accessUsers) UserBySession(_ context.Context, hash string, _ time.Time) (*user.User, error) {
-	id, ok := m.sessions[hash]
-	if !ok {
+func (m *accessUsers) UserBySession(_ context.Context, hash string, now time.Time) (*user.User, error) {
+	s, ok := m.sessions[hash]
+	if !ok || !s.expires.After(now) {
 		return nil, nil
 	}
-	u := m.users[id]
+	u := m.users[s.userID]
 	return &u, nil
 }
 func (m *accessUsers) DeleteSession(_ context.Context, hash string) error {
@@ -92,6 +98,11 @@ func (m *accessReports) React(_ context.Context, id, userID uuid.UUID, t report.
 	r.LikeCount = len(m.reactions)
 	return &r, nil
 }
+func (m *accessReports) RemoveReaction(_ context.Context, id, userID uuid.UUID) (*report.ReportWithStats, error) {
+	delete(m.reactions, userID)
+	r := m.items[id]
+	return &r, nil
+}
 func (m *accessReports) MyReaction(_ context.Context, _, userID uuid.UUID) (*report.ReactionType, error) {
 	if t, ok := m.reactions[userID]; ok {
 		return &t, nil
@@ -116,6 +127,23 @@ func (m *accessFollows) CountPlaces(_ context.Context, userID uuid.UUID) (int, e
 func (m *accessFollows) Create(_ context.Context, f *follow.Follow) error {
 	m.places = append(m.places, *f)
 	return nil
+}
+func (m *accessFollows) GetPlace(_ context.Context, userID, id uuid.UUID) (*follow.Follow, error) {
+	for _, p := range m.places {
+		if p.ID == id && *p.UserID == userID {
+			return &p, nil
+		}
+	}
+	return nil, nil
+}
+func (m *accessFollows) DeletePlace(_ context.Context, userID, id uuid.UUID) (bool, error) {
+	for i, p := range m.places {
+		if p.ID == id && *p.UserID == userID {
+			m.places = append(m.places[:i], m.places[i+1:]...)
+			return true, nil
+		}
+	}
+	return false, nil
 }
 func (m *accessFollows) PlaceSummaries(_ context.Context, userID uuid.UUID, _ []report.Severity, _ []report.Type, _ time.Time) ([]follow.PlaceWithSummary, error) {
 	out := []follow.PlaceWithSummary{}
@@ -163,6 +191,7 @@ func (m *accessEvents) Delete(_ context.Context, id uuid.UUID) error { delete(m.
 
 type accessFixture struct {
 	router  *gin.Engine
+	users   *accessUsers
 	reports *accessReports
 	events  *accessEvents
 	follows *accessFollows
@@ -176,7 +205,8 @@ func newAccessFixture() *accessFixture {
 		events:  &accessEvents{items: map[uuid.UUID]event.Event{}},
 		follows: &accessFollows{},
 	}
-	users := &accessUsers{users: map[uuid.UUID]user.User{}, sessions: map[string]uuid.UUID{}}
+	users := &accessUsers{users: map[uuid.UUID]user.User{}, sessions: map[string]accessSession{}}
+	f.users = users
 	authService := appauth.NewService(users, f.follows, accessHasher{}, clock)
 	imageURL := func(base, key string) string { return base + "/" + key }
 	followService := appfollow.NewService(f.follows, f.reports, clock)
@@ -185,24 +215,36 @@ func newAccessFixture() *accessFixture {
 		ReportHandler:     NewReportHandler(appreport.NewService(f.reports, clock, policy), NewReportPresenter(clock, "https://ik.example", imageURL)),
 		SavedPlaceHandler: NewSavedPlaceHandler(followService),
 		SOSHandler:        NewSOSHandler(appsos.NewService(nil, clock)),
-		AuthHandler:       NewAuthHandler(authService),
+		AuthHandler:       NewAuthHandler(authService, testCookie),
 		EventHandler:      NewEventHandler(appevent.NewService(f.events, clock), clock, "https://ik.example", imageURL),
 		AuthService:       authService,
-		WebOrigin:         "http://localhost:3000",
+		SessionCookie:     testCookie,
+		WebOrigins:        []string{webOrigin},
 	})
 	return f
 }
 
-// signUp registers an account and returns its bearer token.
-func (f *accessFixture) signUp(t *testing.T, email string) string {
+// signUp registers an account and returns its browser session.
+func (f *accessFixture) signUp(t *testing.T, email string) browserSession {
 	t.Helper()
-	w := send(f.router, http.MethodPost, "/api/v1/auth/register", "", map[string]any{
+	w := f.send(guest, http.MethodPost, "/api/v1/auth/register", map[string]any{
 		"email": email, "password": "correct horse", "display_name": "สมชาย",
 	})
 	if w.Code != http.StatusCreated {
 		t.Fatalf("register: %d %s", w.Code, w.Body)
 	}
-	return decodeJSON[sessionResponse](t, w).Token
+	return sessionFrom(t, w)
+}
+
+// send is a request from the web app (Origin set) holding s's cookie and,
+// on writes, its CSRF token — what the browser client does.
+func (f *accessFixture) send(s browserSession, method, path string, body any) *httptest.ResponseRecorder {
+	return sendAs(f.router, s, method, path, body, func(r *http.Request) {
+		r.Header.Set("Origin", webOrigin)
+		if s.csrf != "" && !isSafeMethod(method) {
+			r.Header.Set(csrfHeader, s.csrf)
+		}
+	})
 }
 
 func (f *accessFixture) seedReport() uuid.UUID {
@@ -240,12 +282,12 @@ func TestGuestPermissions(t *testing.T) {
 	assertStatus(t, get(f.router, "/api/v1/events"), http.StatusOK, "guest lists events")
 
 	// A safety-critical incident can be reported anonymously…
-	w := send(f.router, http.MethodPost, "/api/v1/reports", "", map[string]any{
+	w := f.send(guest, http.MethodPost, "/api/v1/reports", map[string]any{
 		"type": "accident", "severity": "high", "latitude": 13.75, "longitude": 100.5,
 	})
 	assertStatus(t, w, http.StatusCreated, "guest reports an accident")
 	// …a non-guest category can't, whatever the client sends.
-	w = send(f.router, http.MethodPost, "/api/v1/reports", "", map[string]any{
+	w = f.send(guest, http.MethodPost, "/api/v1/reports", map[string]any{
 		"type": "construction", "severity": "moderate", "latitude": 13.75, "longitude": 100.5,
 	})
 	assertStatus(t, w, http.StatusUnauthorized, "guest reports construction")
@@ -263,14 +305,14 @@ func TestGuestPermissions(t *testing.T) {
 		{http.MethodPatch, "/api/v1/events/" + uuid.NewString(), "edit event"},
 		{http.MethodGet, "/api/v1/events/mine", "my events"},
 	} {
-		w := send(f.router, c.method, c.path, "", map[string]any{"type": "like", "device_id": "12345678-aaaa-bbbb-cccc-dddddddddddd"})
+		w := f.send(guest, c.method, c.path, map[string]any{"type": "like", "device_id": "12345678-aaaa-bbbb-cccc-dddddddddddd"})
 		assertStatus(t, w, http.StatusUnauthorized, "guest "+c.what)
 		if !strings.Contains(w.Body.String(), `"UNAUTHORIZED"`) {
 			t.Errorf("guest %s: body %s", c.what, w.Body)
 		}
 	}
 	// A forged token is no better than none.
-	w = send(f.router, http.MethodPost, "/api/v1/events", "forged-token", eventBody())
+	w = f.send(browserSession{cookie: "forged-token", csrf: csrfToken("forged-token")}, http.MethodPost, "/api/v1/events", eventBody())
 	assertStatus(t, w, http.StatusUnauthorized, "forged token creates event")
 }
 
@@ -280,33 +322,33 @@ func TestSignedInUserPermissions(t *testing.T) {
 	alice := f.signUp(t, "alice@example.com")
 	bob := f.signUp(t, "bob@example.com")
 
-	w := send(f.router, http.MethodPost, "/api/v1/reports/"+reportID.String()+"/reactions", alice, map[string]any{"type": "support"})
+	w := f.send(alice, http.MethodPost, "/api/v1/reports/"+reportID.String()+"/reactions", map[string]any{"type": "support"})
 	assertStatus(t, w, http.StatusOK, "user reacts")
 	if got := decodeJSON[reportWithReactionResponse](t, w); got.MyReaction == nil || *got.MyReaction != "support" {
 		t.Errorf("my_reaction = %v, want support", got.MyReaction)
 	}
-	w = send(f.router, http.MethodGet, "/api/v1/reports/"+reportID.String(), bob, nil)
+	w = f.send(bob, http.MethodGet, "/api/v1/reports/"+reportID.String(), nil)
 	if got := decodeJSON[reportWithReactionResponse](t, w); got.MyReaction != nil {
 		t.Errorf("bob sees alice's reaction as his own: %v", *got.MyReaction)
 	}
 
-	w = send(f.router, http.MethodPost, "/api/v1/reports", alice, map[string]any{
+	w = f.send(alice, http.MethodPost, "/api/v1/reports", map[string]any{
 		"type": "construction", "severity": "moderate", "latitude": 13.75, "longitude": 100.5,
 	})
 	assertStatus(t, w, http.StatusCreated, "user reports construction")
 
 	// Saved places are private to their owner.
-	w = send(f.router, http.MethodPost, "/api/v1/saved-places", alice, map[string]any{
+	w = f.send(alice, http.MethodPost, "/api/v1/saved-places", map[string]any{
 		"name": "ที่ทำงาน", "icon": "work", "latitude": 13.72, "longitude": 100.53,
 	})
 	assertStatus(t, w, http.StatusCreated, "user saves a place")
-	w = send(f.router, http.MethodGet, "/api/v1/saved-places", bob, nil)
+	w = f.send(bob, http.MethodGet, "/api/v1/saved-places", nil)
 	if strings.Contains(w.Body.String(), "ที่ทำงาน") {
 		t.Errorf("bob can read alice's saved place: %s", w.Body)
 	}
 
 	// Events: create, public read without owner identity, owner-only edits.
-	w = send(f.router, http.MethodPost, "/api/v1/events", alice, eventBody())
+	w = f.send(alice, http.MethodPost, "/api/v1/events", eventBody())
 	assertStatus(t, w, http.StatusCreated, "user creates event")
 	created := decodeJSON[eventResponse](t, w)
 	if !created.IsMine || created.Organizer.DisplayName != "สมชาย" || created.Status != "active" {
@@ -325,28 +367,28 @@ func TestSignedInUserPermissions(t *testing.T) {
 		t.Error("is_mine must be false for a guest")
 	}
 
-	w = send(f.router, http.MethodPatch, "/api/v1/events/"+created.ID, bob, map[string]any{"title": "hijacked"})
+	w = f.send(bob, http.MethodPatch, "/api/v1/events/"+created.ID, map[string]any{"title": "hijacked"})
 	assertStatus(t, w, http.StatusForbidden, "another user edits event")
-	w = send(f.router, http.MethodPost, "/api/v1/events/"+created.ID+"/cancel", bob, nil)
+	w = f.send(bob, http.MethodPost, "/api/v1/events/"+created.ID+"/cancel", nil)
 	assertStatus(t, w, http.StatusForbidden, "another user cancels event")
 
-	w = send(f.router, http.MethodPatch, "/api/v1/events/"+created.ID, alice, map[string]any{"title": "ถนนคนเดินวันเสาร์"})
+	w = f.send(alice, http.MethodPatch, "/api/v1/events/"+created.ID, map[string]any{"title": "ถนนคนเดินวันเสาร์"})
 	assertStatus(t, w, http.StatusOK, "owner edits event")
-	w = send(f.router, http.MethodPost, "/api/v1/events/"+created.ID+"/cancel", alice, nil)
+	w = f.send(alice, http.MethodPost, "/api/v1/events/"+created.ID+"/cancel", nil)
 	assertStatus(t, w, http.StatusOK, "owner cancels event")
 	if got := decodeJSON[eventResponse](t, w); got.Status != "cancelled" || got.Title != "ถนนคนเดินวันเสาร์" {
 		t.Errorf("after edit+cancel: %+v", got)
 	}
 
 	// Signing out ends the session.
-	assertStatus(t, send(f.router, http.MethodPost, "/api/v1/auth/logout", alice, nil), http.StatusNoContent, "logout")
-	assertStatus(t, send(f.router, http.MethodGet, "/api/v1/auth/me", alice, nil), http.StatusUnauthorized, "me after logout")
+	assertStatus(t, f.send(alice, http.MethodPost, "/api/v1/auth/logout", nil), http.StatusNoContent, "logout")
+	assertStatus(t, f.send(alice, http.MethodGet, "/api/v1/auth/me", nil), http.StatusUnauthorized, "me after logout")
 }
 
 func TestAuthMeNeverExposesThePasswordHash(t *testing.T) {
 	f := newAccessFixture()
 	token := f.signUp(t, "carol@example.com")
-	w := send(f.router, http.MethodGet, "/api/v1/auth/me", token, nil)
+	w := f.send(token, http.MethodGet, "/api/v1/auth/me", nil)
 	assertStatus(t, w, http.StatusOK, "me")
 	if strings.Contains(w.Body.String(), "h:correct horse") || strings.Contains(w.Body.String(), "password") {
 		t.Errorf("/auth/me leaks credentials: %s", w.Body)

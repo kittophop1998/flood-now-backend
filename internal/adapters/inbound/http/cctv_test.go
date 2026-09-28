@@ -39,7 +39,7 @@ func newCCTVRouter(service *appcctv.Service) *gin.Engine {
 	return NewRouter(Deps{
 		ConfigHandler: NewConfigHandler(nil, false, service != nil),
 		CCTVHandler:   NewCCTVHandler(service),
-		WebOrigin:     "http://localhost:3000",
+		WebOrigins:    []string{"http://localhost:3000"},
 	})
 }
 

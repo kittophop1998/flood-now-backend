@@ -84,7 +84,7 @@ func newAnnouncementRouter(repo *memAnnouncements, presigner *fakePresigner) *gi
 		}),
 		UploadHandler: NewUploadHandler(appupload.NewService(presigner, clock)),
 		AdminToken:    testAdminToken,
-		WebOrigin:     "http://localhost:3000",
+		WebOrigins:    []string{"http://localhost:3000"},
 	})
 }
 

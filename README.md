@@ -9,7 +9,7 @@ FloodNow backend. Go + Gin + PostgreSQL, Clean/Hexagonal architecture — see [`
 docker compose up -d postgres
 
 cd apps/api
-cp .env.example .env   # edit if needed
+cp .env.example .env   # edit if needed (keep APP_ENV=development for http://localhost)
 set -a && source .env && set +a
 make migrate-up
 make run                # http://localhost:4000

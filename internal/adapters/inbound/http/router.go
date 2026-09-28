@@ -6,6 +6,7 @@ package http
 import (
 	"context"
 	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -35,15 +36,31 @@ type Deps struct {
 	// AuthService resolves user session tokens; nil means nobody is ever
 	// signed in (tests that don't need accounts).
 	AuthService *appauth.Service
-	WebOrigin   string
+	// SessionCookie carries the user session (see session.go).
+	SessionCookie SessionCookie
+	// WebOrigins are the exact web-app origins allowed CORS with
+	// credentials and signed-in writes (never "*").
+	WebOrigins []string
+	// RequireHTTPS (production) refuses plain http and sends HSTS.
+	RequireHTTPS bool
+	// TrustedProxies may set X-Forwarded-For/-Proto; nil trusts nobody.
+	TrustedProxies []string
 	// AdminToken gates /api/v1/admin/*. Empty disables those routes.
 	AdminToken string
 }
 
 func NewRouter(deps Deps) *gin.Engine {
 	r := gin.New()
+	// Gin trusts every peer's X-Forwarded-For by default; only our proxies'.
+	if err := r.SetTrustedProxies(deps.TrustedProxies); err != nil {
+		panic(fmt.Sprintf("invalid trusted proxies: %v", err))
+	}
+	origins := newOriginSet(deps.WebOrigins)
 	r.Use(gin.Recovery())
-	r.Use(corsMiddleware(deps.WebOrigin))
+	if deps.RequireHTTPS {
+		r.Use(httpsOnlyMiddleware(parseTrustedProxies(deps.TrustedProxies)))
+	}
+	r.Use(corsMiddleware(origins))
 	r.Use(timeoutMiddleware(10 * time.Second))
 	r.Use(bodyLimitMiddleware(1 << 20)) // 1 MiB — request bodies are JSON metadata only, images go straight to R2
 
@@ -55,9 +72,11 @@ func NewRouter(deps Deps) *gin.Engine {
 	// (e.g. my_reaction, is_mine) and lets a signed-in reporter own a
 	// report; requireAuth guards interactions, private data and owned
 	// content (401 UNAUTHORIZED for guests). Who may do what is decided in
-	// the application layer.
-	optionalAuth := authMiddleware(deps.AuthService, false)
-	requireAuth := authMiddleware(deps.AuthService, true)
+	// the application layer. Both also enforce Origin + CSRF token on
+	// signed-in writes (session.go).
+	optionalAuth := authMiddleware(deps.AuthService, deps.SessionCookie, origins, false)
+	requireAuth := authMiddleware(deps.AuthService, deps.SessionCookie, origins, true)
+	sameOrigin := originGuard(origins)
 	// Per-IP brakes (in-memory, per instance): anonymous report creation and
 	// password guessing. Generous, since many phones share a carrier IP.
 	guestReportLimit := rateLimit(newRateLimiter(30, 10*time.Minute), true)
@@ -68,10 +87,12 @@ func NewRouter(deps Deps) *gin.Engine {
 	{
 		v1.GET("/config/public", deps.ConfigHandler.Public)
 
-		v1.POST("/auth/register", registerLimit, deps.AuthHandler.Register)
-		v1.POST("/auth/login", loginLimit, deps.AuthHandler.Login)
-		v1.POST("/auth/logout", requireAuth, deps.AuthHandler.Logout)
-		v1.GET("/auth/me", requireAuth, deps.AuthHandler.Me)
+		auth := v1.Group("/auth", noStore)
+		auth.POST("/register", sameOrigin, registerLimit, deps.AuthHandler.Register)
+		auth.POST("/login", sameOrigin, loginLimit, deps.AuthHandler.Login)
+		auth.POST("/logout", optionalAuth, deps.AuthHandler.Logout)
+		auth.GET("/session", optionalAuth, deps.AuthHandler.Session)
+		auth.GET("/me", requireAuth, deps.AuthHandler.Me)
 
 		v1.GET("/reports", deps.ReportHandler.List)
 		v1.GET("/reports/aggregate", deps.ReportHandler.Aggregate)
@@ -150,20 +171,6 @@ func NewRouter(deps Deps) *gin.Engine {
 	}
 
 	return r
-}
-
-func corsMiddleware(webOrigin string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", webOrigin)
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		c.Header("Access-Control-Max-Age", "600")
-		if c.Request.Method == http.MethodOptions {
-			c.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-		c.Next()
-	}
 }
 
 // adminMiddleware requires "Authorization: Bearer <ADMIN_TOKEN>". User
