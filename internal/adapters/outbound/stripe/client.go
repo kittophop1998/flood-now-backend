@@ -1,8 +1,8 @@
-// Package stripe is the Stripe adapter for provider credit top-ups: it
-// creates hosted Checkout sessions and verifies/decodes webhooks. It talks
-// to Stripe's REST API directly (form-encoded, bearer secret key) — two
-// calls don't justify the SDK. It is only ever used for provider credit,
-// never for a customer's payment for a service.
+// Package stripe is the Stripe adapter for provider credit top-ups, paid by
+// PromptPay only: it creates a PromptPay PaymentIntent (whose QR the app
+// shows) and verifies/decodes webhooks. It talks to Stripe's REST API
+// directly (form-encoded, bearer secret key) — two calls don't justify the
+// SDK. Never cards, and never a customer's payment for a service.
 package stripe
 
 import (
@@ -44,25 +44,24 @@ func New(baseURL, secretKey, webhookSecret string, timeout time.Duration) *Clien
 	}
 }
 
-// CreateCheckout creates a one-off Checkout session in THB for the top-up.
-// client_reference_id and metadata carry our ids for correlation only; the
-// webhook handler trusts our stored record, not these.
-func (c *Client) CreateCheckout(ctx context.Context, req ports.CheckoutRequest) (*ports.CheckoutSession, error) {
+// CreatePromptPay creates and confirms a THB PaymentIntent restricted to
+// PromptPay, so Stripe answers with the QR to scan (next_action
+// promptpay_display_qr_code). Metadata carries our ids for correlation
+// only; the webhook handler trusts our stored record, not these.
+func (c *Client) CreatePromptPay(ctx context.Context, req ports.PromptPayRequest) (*ports.PromptPayCharge, error) {
 	form := url.Values{}
-	form.Set("mode", "payment")
-	form.Set("success_url", req.SuccessURL)
-	form.Set("cancel_url", req.CancelURL)
-	form.Set("client_reference_id", req.TopupID.String())
-	form.Set("line_items[0][quantity]", "1")
-	form.Set("line_items[0][price_data][currency]", req.Currency)
-	form.Set("line_items[0][price_data][unit_amount]", strconv.Itoa(req.Amount))
-	form.Set("line_items[0][price_data][product_data][name]", req.Description)
+	form.Set("amount", strconv.Itoa(req.Amount))
+	form.Set("currency", req.Currency)
+	form.Set("payment_method_types[]", "promptpay")
+	form.Set("payment_method_data[type]", "promptpay")
+	form.Set("payment_method_data[billing_details][email]", req.Email)
+	form.Set("confirm", "true")
+	form.Set("description", req.Description)
 	for k, v := range map[string]string{"topup_id": req.TopupID.String(), "provider_id": req.ProviderID.String(), "package_id": req.PackageID} {
 		form.Set("metadata["+k+"]", v)
-		form.Set("payment_intent_data[metadata]["+k+"]", v)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/checkout/sessions", strings.NewReader(form.Encode()))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/payment_intents", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("build stripe request: %w", err)
 	}
@@ -73,7 +72,7 @@ func (c *Client) CreateCheckout(ctx context.Context, req ports.CheckoutRequest) 
 
 	res, err := c.http.Do(httpReq)
 	if err != nil {
-		log.Printf("stripe checkout create: %v", err)
+		log.Printf("stripe promptpay create: %v", err)
 		return nil, apperr.Unavailable("the payment provider is unavailable; try again")
 	}
 	defer res.Body.Close()
@@ -82,21 +81,32 @@ func (c *Client) CreateCheckout(ctx context.Context, req ports.CheckoutRequest) 
 		var e struct {
 			Error struct {
 				Type    string `json:"type"`
+				Code    string `json:"code"`
 				Message string `json:"message"`
 			} `json:"error"`
 		}
 		_ = json.Unmarshal(body, &e)
-		log.Printf("stripe checkout create: status %d type=%s message=%q", res.StatusCode, e.Error.Type, e.Error.Message)
+		log.Printf("stripe promptpay create: status %d type=%s code=%s message=%q", res.StatusCode, e.Error.Type, e.Error.Code, e.Error.Message)
 		return nil, apperr.Unavailable("the payment provider is unavailable; try again")
 	}
-	var s struct {
-		ID  string `json:"id"`
-		URL string `json:"url"`
+	var pi struct {
+		ID         string `json:"id"`
+		NextAction *struct {
+			Type string `json:"type"`
+			QR   *struct {
+				Data        string `json:"data"`
+				ImageURLPNG string `json:"image_url_png"`
+			} `json:"promptpay_display_qr_code"`
+		} `json:"next_action"`
 	}
-	if err := json.Unmarshal(body, &s); err != nil || s.ID == "" || s.URL == "" {
-		return nil, fmt.Errorf("decode stripe checkout session: %v", err)
+	if err := json.Unmarshal(body, &pi); err != nil || pi.ID == "" {
+		return nil, fmt.Errorf("decode stripe payment intent: %v", err)
 	}
-	return &ports.CheckoutSession{ID: s.ID, URL: s.URL}, nil
+	if pi.NextAction == nil || pi.NextAction.QR == nil || pi.NextAction.QR.Data == "" {
+		log.Printf("stripe promptpay create: payment intent %s has no PromptPay QR (is PromptPay enabled on the account?)", pi.ID)
+		return nil, apperr.Unavailable("PromptPay isn't available right now; try again later")
+	}
+	return &ports.PromptPayCharge{PaymentIntentID: pi.ID, QRData: pi.NextAction.QR.Data, QRImageURL: pi.NextAction.QR.ImageURLPNG}, nil
 }
 
 // ParseWebhook verifies the Stripe-Signature header (HMAC-SHA256 of
@@ -118,37 +128,41 @@ func (c *Client) ParseWebhook(payload []byte, header string, now time.Time) (*po
 	}
 	out := &ports.PaymentEvent{ID: ev.ID, Type: ev.Type, Metadata: map[string]string{}}
 	switch {
-	case strings.HasPrefix(ev.Type, "checkout.session."):
-		var s struct {
-			ID                string            `json:"id"`
-			ClientReferenceID string            `json:"client_reference_id"`
-			AmountTotal       int               `json:"amount_total"`
-			Currency          string            `json:"currency"`
-			PaymentStatus     string            `json:"payment_status"`
-			PaymentIntent     *string           `json:"payment_intent"`
-			Metadata          map[string]string `json:"metadata"`
+	case strings.HasPrefix(ev.Type, "payment_intent."):
+		var pi struct {
+			ID             string            `json:"id"`
+			Amount         int               `json:"amount"`
+			AmountReceived int               `json:"amount_received"`
+			Currency       string            `json:"currency"`
+			Status         string            `json:"status"`
+			Metadata       map[string]string `json:"metadata"`
 		}
-		if err := json.Unmarshal(ev.Data.Object, &s); err != nil {
+		if err := json.Unmarshal(ev.Data.Object, &pi); err != nil {
 			return nil, apperr.Validation("webhook payload is invalid", nil)
 		}
-		out.SessionID, out.ClientReference, out.Amount = s.ID, s.ClientReferenceID, s.AmountTotal
-		out.Currency, out.PaymentStatus, out.PaymentIntentID = strings.ToLower(s.Currency), s.PaymentStatus, s.PaymentIntent
-		if s.Metadata != nil {
-			out.Metadata = s.Metadata
+		out.PaymentIntentID, out.Currency, out.Status = pi.ID, strings.ToLower(pi.Currency), pi.Status
+		// What was actually received counts for a success.
+		out.Amount = pi.Amount
+		if pi.Status == "succeeded" {
+			out.Amount = pi.AmountReceived
+		}
+		if pi.Metadata != nil {
+			out.Metadata = pi.Metadata
+			out.TopupRef = pi.Metadata["topup_id"]
 		}
 	case ev.Type == "charge.refunded":
 		var ch struct {
-			PaymentIntent *string `json:"payment_intent"`
-			Refunded      bool    `json:"refunded"`
-			Currency      string  `json:"currency"`
-			Amount        int     `json:"amount"`
+			PaymentIntent string `json:"payment_intent"`
+			Refunded      bool   `json:"refunded"`
+			Currency      string `json:"currency"`
+			Amount        int    `json:"amount"`
 		}
 		if err := json.Unmarshal(ev.Data.Object, &ch); err != nil {
 			return nil, apperr.Validation("webhook payload is invalid", nil)
 		}
 		out.PaymentIntentID, out.Amount, out.Currency = ch.PaymentIntent, ch.Amount, strings.ToLower(ch.Currency)
 		if ch.Refunded {
-			out.PaymentStatus = "refunded" // fully refunded; partial refunds are left to operators
+			out.Status = "refunded" // fully refunded; partial refunds are left to operators
 		}
 	}
 	return out, nil

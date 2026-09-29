@@ -577,8 +577,7 @@ type CancelParams struct {
 // credits the wallet only if the stored top-up matches it exactly.
 type TopupPaid struct {
 	TopupID         uuid.UUID
-	SessionID       string
-	PaymentIntentID *string
+	PaymentIntentID string
 	Amount          int
 	Currency        string
 	Now             time.Time
@@ -636,9 +635,10 @@ type LocalServiceRepository interface {
 	// Wallet.
 	Transactions(ctx context.Context, providerID uuid.UUID, limit int) ([]localservice.Transaction, error)
 	CreateTopup(ctx context.Context, t *localservice.Topup) error
-	SetTopupSession(ctx context.Context, id uuid.UUID, sessionID string, now time.Time) error
+	// SetTopupPayment records the Stripe PaymentIntent and its PromptPay QR.
+	SetTopupPayment(ctx context.Context, id uuid.UUID, charge PromptPayCharge, now time.Time) error
 	GetTopup(ctx context.Context, id uuid.UUID) (*localservice.Topup, error)
-	GetTopupBySession(ctx context.Context, sessionID string) (*localservice.Topup, error)
+	GetTopupByPaymentIntent(ctx context.Context, paymentIntentID string) (*localservice.Topup, error)
 	RecentTopups(ctx context.Context, providerID uuid.UUID, limit int) ([]localservice.Topup, error)
 	// MarkTopupPaid credits the wallet exactly once for a verified payment.
 	// credited is false for a repeat (already paid) or a mismatch.
@@ -658,23 +658,25 @@ type LocalServiceRepository interface {
 	SetProviderStatus(ctx context.Context, id uuid.UUID, status localservice.ProviderStatus, now time.Time) error
 }
 
-// CheckoutRequest asks the payment provider for a hosted checkout page for
-// one top-up. Amount/currency come from the server's package table.
-type CheckoutRequest struct {
+// PromptPayRequest asks the payment provider for a PromptPay payment of one
+// top-up. Amount/currency come from the server's package table.
+type PromptPayRequest struct {
 	TopupID     uuid.UUID
 	ProviderID  uuid.UUID
 	PackageID   string
 	Amount      int
 	Currency    string
 	Description string
-	SuccessURL  string
-	CancelURL   string
+	// Email is required by Stripe for PromptPay (the payer's receipt).
+	Email string
 }
 
-// CheckoutSession is the hosted page the provider is sent to.
-type CheckoutSession struct {
-	ID  string
-	URL string
+// PromptPayCharge is the created payment and the QR to scan.
+type PromptPayCharge struct {
+	PaymentIntentID string
+	// QRData is the EMVCo PromptPay payload; QRImageURL Stripe's PNG of it.
+	QRData     string
+	QRImageURL string
 }
 
 // PaymentEvent is a verified (signature-checked) payment webhook, reduced
@@ -682,21 +684,22 @@ type CheckoutSession struct {
 type PaymentEvent struct {
 	ID              string
 	Type            string
-	SessionID       string
-	PaymentIntentID *string
-	// ClientReference is our top-up id as we sent it.
-	ClientReference string
-	Amount          int
-	Currency        string
-	PaymentStatus   string
-	// Metadata is correlation only; trusted values come from our own record.
+	PaymentIntentID string
+	// TopupRef is our top-up id from the PaymentIntent metadata
+	// (correlation only; trusted values come from our own record).
+	TopupRef string
+	Amount   int
+	Currency string
+	// Status: the PaymentIntent status, or "refunded" for a fully
+	// refunded charge.
+	Status   string
 	Metadata map[string]string
 }
 
-// PaymentProvider is the Stripe boundary (credit top-ups only — never a
-// customer's payment for a service).
+// PaymentProvider is the Stripe boundary — PromptPay credit top-ups only;
+// never a customer's payment for a service, never cards.
 type PaymentProvider interface {
-	CreateCheckout(ctx context.Context, req CheckoutRequest) (*CheckoutSession, error)
+	CreatePromptPay(ctx context.Context, req PromptPayRequest) (*PromptPayCharge, error)
 	// ParseWebhook verifies the signature header over the raw payload and
 	// decodes the event. Any failure is VALIDATION_ERROR/UNAUTHORIZED.
 	ParseWebhook(payload []byte, signatureHeader string, now time.Time) (*PaymentEvent, error)

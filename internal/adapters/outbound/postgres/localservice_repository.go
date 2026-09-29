@@ -93,12 +93,12 @@ func matchDest(m *ls.Match) []any {
 }
 
 const topupColumns = `t.id, t.provider_id, t.package_id, t.amount, t.currency, t.credit_amount, t.status,
-	t.stripe_checkout_session_id, t.stripe_payment_intent_id, t.paid_at, t.created_at, t.updated_at`
+	t.stripe_payment_intent_id, t.promptpay_qr_data, t.promptpay_qr_image_url, t.paid_at, t.created_at, t.updated_at`
 
 func scanTopup(row rowScanner) (*ls.Topup, error) {
 	var t ls.Topup
 	if err := row.Scan(&t.ID, &t.ProviderID, &t.PackageID, &t.Amount, &t.Currency, &t.CreditAmount, &t.Status,
-		&t.StripeCheckoutSessionID, &t.StripePaymentIntentID, &t.PaidAt, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		&t.StripePaymentIntentID, &t.PromptPayQRData, &t.PromptPayQRImageURL, &t.PaidAt, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -921,12 +921,14 @@ func (repo *LocalServiceRepository) CreateTopup(ctx context.Context, t *ls.Topup
 	return nil
 }
 
-func (repo *LocalServiceRepository) SetTopupSession(ctx context.Context, id uuid.UUID, sessionID string, now time.Time) error {
-	// A webhook may already have recorded the session (and even paid it):
-	// only fill it in when still empty.
-	if _, err := repo.db.ExecContext(ctx, `UPDATE provider_topups SET stripe_checkout_session_id = $2, updated_at = $3
-		WHERE id = $1 AND stripe_checkout_session_id IS NULL`, id, sessionID, now); err != nil {
-		return fmt.Errorf("set topup session: %w", err)
+func (repo *LocalServiceRepository) SetTopupPayment(ctx context.Context, id uuid.UUID, c ports.PromptPayCharge, now time.Time) error {
+	// A webhook may already have recorded the PaymentIntent: only fill it
+	// in when still empty. The QR is stored either way.
+	if _, err := repo.db.ExecContext(ctx, `UPDATE provider_topups SET
+			stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, $2),
+			promptpay_qr_data = $3, promptpay_qr_image_url = NULLIF($4, ''), updated_at = $5
+		WHERE id = $1`, id, c.PaymentIntentID, c.QRData, c.QRImageURL, now); err != nil {
+		return fmt.Errorf("set topup payment: %w", err)
 	}
 	return nil
 }
@@ -936,9 +938,9 @@ func (repo *LocalServiceRepository) GetTopup(ctx context.Context, id uuid.UUID) 
 	return noRows(t, err, "get topup")
 }
 
-func (repo *LocalServiceRepository) GetTopupBySession(ctx context.Context, sessionID string) (*ls.Topup, error) {
-	t, err := scanTopup(repo.db.QueryRowContext(ctx, `SELECT `+topupColumns+` FROM provider_topups t WHERE t.stripe_checkout_session_id = $1`, sessionID))
-	return noRows(t, err, "get topup by session")
+func (repo *LocalServiceRepository) GetTopupByPaymentIntent(ctx context.Context, paymentIntentID string) (*ls.Topup, error) {
+	t, err := scanTopup(repo.db.QueryRowContext(ctx, `SELECT `+topupColumns+` FROM provider_topups t WHERE t.stripe_payment_intent_id = $1`, paymentIntentID))
+	return noRows(t, err, "get topup by payment intent")
 }
 
 func (repo *LocalServiceRepository) RecentTopups(ctx context.Context, providerID uuid.UUID, limit int) ([]ls.Topup, error) {
@@ -960,7 +962,7 @@ func (repo *LocalServiceRepository) RecentTopups(ctx context.Context, providerID
 }
 
 // MarkTopupPaid locks the top-up, re-checks it against the verified payment
-// (session, amount, currency) and, unless it is already paid or refunded,
+// (PaymentIntent, amount, currency) and, unless it is already paid or refunded,
 // marks it paid and appends the TOP_UP ledger row (key per top-up) in the
 // same transaction. A late "paid" after "expired"/"failed" still credits:
 // the money was taken.
@@ -977,12 +979,11 @@ func (repo *LocalServiceRepository) MarkTopupPaid(ctx context.Context, p ports.T
 	if t.Status == ls.TopupPaid || t.Status == ls.TopupRefunded {
 		return false, nil
 	}
-	if (t.StripeCheckoutSessionID != nil && *t.StripeCheckoutSessionID != p.SessionID) || t.Amount != p.Amount || t.Currency != p.Currency {
+	if (t.StripePaymentIntentID != nil && *t.StripePaymentIntentID != p.PaymentIntentID) || t.Amount != p.Amount || t.Currency != p.Currency {
 		return false, nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE provider_topups SET status = 'paid', stripe_checkout_session_id = $2,
-		stripe_payment_intent_id = COALESCE($3, stripe_payment_intent_id), paid_at = $4, updated_at = $4 WHERE id = $1`,
-		t.ID, p.SessionID, p.PaymentIntentID, p.Now); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE provider_topups SET status = 'paid', stripe_payment_intent_id = $2,
+		paid_at = $3, updated_at = $3 WHERE id = $1`, t.ID, p.PaymentIntentID, p.Now); err != nil {
 		return false, fmt.Errorf("mark topup paid: %w", err)
 	}
 	tid := t.ID

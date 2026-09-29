@@ -98,8 +98,9 @@ func (p BillingPolicy) ChargesMatch() bool { return p.CreditEnabled && p.MatchFe
 // LowCredit reports a balance that can't pay for the next match.
 func (p BillingPolicy) LowCredit(balance int) bool { return p.ChargesMatch() && balance < p.MatchFee }
 
-// TopupStatus is a Stripe top-up's lifecycle. Only a verified webhook moves
-// it to paid (and credits the wallet); the browser's return URL never does.
+// TopupStatus is a PromptPay top-up's lifecycle. Only a verified Stripe
+// webhook moves it to paid (and credits the wallet); nothing the browser
+// says ever does.
 type TopupStatus string
 
 const (
@@ -110,20 +111,23 @@ const (
 	TopupRefunded TopupStatus = "refunded"
 )
 
-// Topup is one credit purchase.
+// Topup is one credit purchase, paid by scanning a PromptPay QR.
 type Topup struct {
-	ID                      uuid.UUID
-	ProviderID              uuid.UUID
-	PackageID               string
-	Amount                  int // minor units (satang)
-	Currency                string
-	CreditAmount            int
-	Status                  TopupStatus
-	StripeCheckoutSessionID *string
-	StripePaymentIntentID   *string
-	PaidAt                  *time.Time
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
+	ID                    uuid.UUID
+	ProviderID            uuid.UUID
+	PackageID             string
+	Amount                int // minor units (satang)
+	Currency              string
+	CreditAmount          int
+	Status                TopupStatus
+	StripePaymentIntentID *string
+	// PromptPayQRData is the QR payload (EMVCo string) to scan;
+	// PromptPayQRImageURL is Stripe's PNG of the same QR (to save/share).
+	PromptPayQRData     *string
+	PromptPayQRImageURL *string
+	PaidAt              *time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // Currency is the only top-up currency.

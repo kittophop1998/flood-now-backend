@@ -273,22 +273,18 @@ func TestWebSecurityConfig(t *testing.T) {
 }
 
 func TestLocalServicesConfig(t *testing.T) {
-	web := []string{"https://floodnow.example"}
 	for _, k := range []string{"SERVICE_PROVIDER_ENABLED", "PROVIDER_CREDIT_ENABLED", "MATCH_FEE_CREDITS", "PROVIDER_WELCOME_CREDITS",
 		"PROVIDER_CONFIRM_TIMEOUT", "SERVICE_REQUEST_TTL", "MATCH_REFUND_GRACE", "STRIPE_TOPUP_ENABLED", "STRIPE_SECRET_KEY",
-		"STRIPE_WEBHOOK_SECRET", "STRIPE_RETURN_URL", "STRIPE_API_BASE", "PROVIDER_TOPUP_PACKAGES"} {
+		"STRIPE_WEBHOOK_SECRET", "STRIPE_API_BASE", "PROVIDER_TOPUP_PACKAGES"} {
 		t.Setenv(k, "")
 	}
 
-	c, warning := loadLocalServices(web, true)
+	c, warning := loadLocalServices()
 	if c.Enabled || c.CreditEnabled || c.StripeEnabled || warning != "" {
 		t.Fatalf("off by default: %+v %q", c, warning)
 	}
 	if c.MatchFee != 20 || c.ConfirmTimeout != 10*time.Minute || c.RequestTTL != 2*time.Hour || c.RefundGrace != 10*time.Minute {
 		t.Fatalf("defaults: %+v", c)
-	}
-	if c.StripeReturnURL != "https://floodnow.example/" {
-		t.Fatalf("return URL should default to the web origin, got %q", c.StripeReturnURL)
 	}
 
 	t.Setenv("SERVICE_PROVIDER_ENABLED", "true")
@@ -297,7 +293,7 @@ func TestLocalServicesConfig(t *testing.T) {
 	t.Setenv("PROVIDER_CONFIRM_TIMEOUT", "1s")
 	t.Setenv("STRIPE_TOPUP_ENABLED", "true")
 	t.Setenv("STRIPE_SECRET_KEY", "sk_test_secret_value")
-	c, warning = loadLocalServices(web, true)
+	c, warning = loadLocalServices()
 	if c.MatchFee != 20 || c.ConfirmTimeout != 10*time.Minute {
 		t.Fatalf("invalid values fall back to defaults: %+v", c)
 	}
@@ -309,16 +305,12 @@ func TestLocalServicesConfig(t *testing.T) {
 	}
 
 	t.Setenv("STRIPE_WEBHOOK_SECRET", "whsec_x")
-	t.Setenv("STRIPE_RETURN_URL", "http://floodnow.example/")
-	if c, warning = loadLocalServices(web, true); c.StripeEnabled || !strings.Contains(warning, "STRIPE_RETURN_URL") {
-		t.Fatalf("production return URL must be https: enabled=%v %q", c.StripeEnabled, warning)
-	}
-	if c, _ = loadLocalServices(web, false); !c.StripeEnabled {
-		t.Fatal("http return URL is fine in development")
+	if c, _ = loadLocalServices(); !c.StripeEnabled {
+		t.Fatal("both secrets + credit on enable top-ups")
 	}
 
 	t.Setenv("PROVIDER_CREDIT_ENABLED", "false")
-	if c, warning = loadLocalServices(web, false); c.StripeEnabled || !strings.Contains(warning, "PROVIDER_CREDIT_ENABLED") {
+	if c, warning = loadLocalServices(); c.StripeEnabled || !strings.Contains(warning, "PROVIDER_CREDIT_ENABLED") {
 		t.Fatalf("top-ups need credit on: enabled=%v %q", c.StripeEnabled, warning)
 	}
 }

@@ -2,8 +2,8 @@ package localservice
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"net/url"
 
 	"github.com/google/uuid"
 
@@ -39,20 +39,21 @@ func (s *Service) Wallet(ctx context.Context, userID uuid.UUID) (*WalletView, er
 }
 
 // StartTopup creates a pending top-up for a server-defined package and a
-// Stripe Checkout session for it. The client only names the package; the
-// amount and credits come from the server. Nothing is credited here — only
-// the verified webhook does that.
-func (s *Service) StartTopup(ctx context.Context, userID uuid.UUID, packageID string) (*ls.Topup, string, error) {
+// Stripe PromptPay payment for it, returning the QR to show. The client
+// only names the package; amount and credits come from the server. Nothing
+// is credited here — only the verified webhook does that. email is the
+// signed-in user's (Stripe requires one for PromptPay).
+func (s *Service) StartTopup(ctx context.Context, userID uuid.UUID, email, packageID string) (*ls.Topup, error) {
 	if s.cfg.Payments == nil {
-		return nil, "", apperr.NotFound("credit top-ups are not available")
+		return nil, apperr.NotFound("credit top-ups are not available")
 	}
 	p, err := s.requireProvider(ctx, userID)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	pkg, ok := ls.FindPackage(s.cfg.Packages, packageID)
 	if !ok {
-		return nil, "", apperr.Validation("package is invalid", map[string]string{"package_id": "must be one of the offered packages"})
+		return nil, apperr.Validation("package is invalid", map[string]string{"package_id": "must be one of the offered packages"})
 	}
 	now := s.clock.Now()
 	t := &ls.Topup{
@@ -60,46 +61,28 @@ func (s *Service) StartTopup(ctx context.Context, userID uuid.UUID, packageID st
 		CreditAmount: pkg.Credits, Status: ls.TopupPending, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.repo.CreateTopup(ctx, t); err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	sess, err := s.cfg.Payments.CreateCheckout(ctx, ports.CheckoutRequest{
+	charge, err := s.cfg.Payments.CreatePromptPay(ctx, ports.PromptPayRequest{
 		TopupID: t.ID, ProviderID: p.ID, PackageID: pkg.ID, Amount: t.Amount, Currency: t.Currency,
-		Description: "FloodNow provider credit",
-		SuccessURL:  s.returnURL(t.ID, false),
-		CancelURL:   s.returnURL(t.ID, true),
+		Description: fmt.Sprintf("FloodNow provider credit (%d)", pkg.Credits), Email: email,
 	})
 	if err != nil {
-		// No session exists, so this top-up can never be paid.
+		// No payment exists, so this top-up can never be paid.
 		if markErr := s.repo.MarkTopup(ctx, t.ID, ls.TopupFailed, now); markErr != nil {
 			log.Printf("topup %s: mark failed: %v", t.ID, markErr)
 		}
-		return nil, "", err
+		return nil, err
 	}
-	if err := s.repo.SetTopupSession(ctx, t.ID, sess.ID, now); err != nil {
-		return nil, "", err
+	if err := s.repo.SetTopupPayment(ctx, t.ID, *charge, now); err != nil {
+		return nil, err
 	}
-	sid := sess.ID
-	t.StripeCheckoutSessionID = &sid
-	log.Printf("topup %s started provider=%s package=%s", t.ID, p.ID, pkg.ID)
-	return t, sess.URL, nil
+	log.Printf("topup %s started provider=%s package=%s payment_intent=%s", t.ID, p.ID, pkg.ID, charge.PaymentIntentID)
+	return s.repo.GetTopup(ctx, t.ID)
 }
 
-func (s *Service) returnURL(topupID uuid.UUID, cancelled bool) string {
-	u, err := url.Parse(s.cfg.ReturnURL)
-	if err != nil {
-		return s.cfg.ReturnURL
-	}
-	q := u.Query()
-	q.Set("topup", topupID.String())
-	if cancelled {
-		q.Set("topup_cancelled", "1")
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
-// Topup returns one of the provider's own top-ups (for "confirming
-// payment…" polling after the Stripe redirect).
+// Topup returns one of the provider's own top-ups (polled while its
+// PromptPay QR is on screen).
 func (s *Service) Topup(ctx context.Context, userID, id uuid.UUID) (*ls.Topup, error) {
 	p, err := s.requireProvider(ctx, userID)
 	if err != nil {
@@ -117,8 +100,8 @@ func (s *Service) Topup(ctx context.Context, userID, id uuid.UUID) (*ls.Topup, e
 
 // HandlePaymentWebhook applies a Stripe webhook. The signature is verified
 // first; the credit then comes only from our own top-up record, and only
-// when the event matches it (session, amount, currency). Every branch is
-// idempotent and order-independent: a duplicated or late event changes
+// when the event matches it (PaymentIntent, amount, currency). Every branch
+// is idempotent and order-independent: a duplicated or late event changes
 // nothing, a paid top-up is never downgraded, and credit is applied once
 // (ledger key per top-up).
 func (s *Service) HandlePaymentWebhook(ctx context.Context, payload []byte, signature string) error {
@@ -131,9 +114,9 @@ func (s *Service) HandlePaymentWebhook(ctx context.Context, payload []byte, sign
 		return err
 	}
 	switch ev.Type {
-	case "checkout.session.completed", "checkout.session.async_payment_succeeded":
-		if ev.PaymentStatus != "paid" {
-			return nil // e.g. a delayed method still processing: wait for async_payment_succeeded
+	case "payment_intent.succeeded":
+		if ev.Status != "succeeded" {
+			return nil
 		}
 		t, err := s.topupFor(ctx, ev)
 		if err != nil || t == nil {
@@ -145,19 +128,20 @@ func (s *Service) HandlePaymentWebhook(ctx context.Context, payload []byte, sign
 			return nil
 		}
 		credited, err := s.repo.MarkTopupPaid(ctx, ports.TopupPaid{
-			TopupID: t.ID, SessionID: ev.SessionID, PaymentIntentID: ev.PaymentIntentID, Amount: ev.Amount, Currency: ev.Currency, Now: now,
+			TopupID: t.ID, PaymentIntentID: ev.PaymentIntentID, Amount: ev.Amount, Currency: ev.Currency, Now: now,
 		})
 		if err != nil {
 			return err
 		}
 		log.Printf("stripe event %s: topup %s paid (credited=%v)", ev.ID, t.ID, credited)
-	case "checkout.session.async_payment_failed", "checkout.session.expired":
+	case "payment_intent.payment_failed", "payment_intent.canceled":
+		// A PromptPay QR that wasn't paid in time (or was cancelled).
 		t, err := s.topupFor(ctx, ev)
 		if err != nil || t == nil {
 			return err
 		}
 		to := ls.TopupExpired
-		if ev.Type == "checkout.session.async_payment_failed" {
+		if ev.Type == "payment_intent.payment_failed" {
 			to = ls.TopupFailed
 		}
 		if err := s.repo.MarkTopup(ctx, t.ID, to, now); err != nil {
@@ -167,10 +151,10 @@ func (s *Service) HandlePaymentWebhook(ctx context.Context, payload []byte, sign
 	case "charge.refunded":
 		// An operator refunded the payment in Stripe. Record it; the credit
 		// itself is corrected only by an explicit admin adjustment.
-		if ev.PaymentIntentID == nil || ev.PaymentStatus != "refunded" {
+		if ev.PaymentIntentID == "" || ev.Status != "refunded" {
 			return nil
 		}
-		t, err := s.repo.MarkTopupRefundedByPaymentIntent(ctx, *ev.PaymentIntentID, now)
+		t, err := s.repo.MarkTopupRefundedByPaymentIntent(ctx, ev.PaymentIntentID, now)
 		if err != nil {
 			return err
 		}
@@ -181,17 +165,17 @@ func (s *Service) HandlePaymentWebhook(ctx context.Context, payload []byte, sign
 	return nil
 }
 
-// topupFor finds our top-up for a checkout event: by the client reference
-// we set (our id), falling back to the session id.
+// topupFor finds our top-up for a PaymentIntent event: by the PaymentIntent
+// we stored, falling back to the top-up id in its metadata.
 func (s *Service) topupFor(ctx context.Context, ev *ports.PaymentEvent) (*ls.Topup, error) {
-	if id, err := uuid.Parse(ev.ClientReference); err == nil {
-		t, err := s.repo.GetTopup(ctx, id)
+	if ev.PaymentIntentID != "" {
+		t, err := s.repo.GetTopupByPaymentIntent(ctx, ev.PaymentIntentID)
 		if err != nil || t != nil {
 			return t, err
 		}
 	}
-	if ev.SessionID != "" {
-		t, err := s.repo.GetTopupBySession(ctx, ev.SessionID)
+	if id, err := uuid.Parse(ev.TopupRef); err == nil {
+		t, err := s.repo.GetTopup(ctx, id)
 		if err != nil || t != nil {
 			return t, err
 		}
@@ -203,7 +187,7 @@ func (s *Service) topupFor(ctx context.Context, ev *ports.PaymentEvent) (*ls.Top
 // paymentMatches checks a paid event against the stored top-up. Metadata is
 // only correlation: when present it must agree, but amounts come from us.
 func paymentMatches(t *ls.Topup, ev *ports.PaymentEvent) bool {
-	if t.StripeCheckoutSessionID != nil && *t.StripeCheckoutSessionID != ev.SessionID {
+	if t.StripePaymentIntentID != nil && *t.StripePaymentIntentID != ev.PaymentIntentID {
 		return false
 	}
 	if pid, ok := ev.Metadata["provider_id"]; ok && pid != t.ProviderID.String() {

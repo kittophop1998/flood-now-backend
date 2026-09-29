@@ -55,21 +55,26 @@ func TestVerifySignature(t *testing.T) {
 	}
 }
 
-func TestParseWebhookCheckoutSession(t *testing.T) {
+func TestParseWebhookPaymentIntent(t *testing.T) {
 	c := New("http://unused", "sk_test", secret, time.Second)
-	payload := []byte(`{"id":"evt_9","type":"checkout.session.completed","data":{"object":{
-		"id":"cs_test_1","client_reference_id":"8e6a1d56-8b0e-4f5b-8f2c-0b7a1b6c2d3e","amount_total":30000,"currency":"THB",
-		"payment_status":"paid","payment_intent":"pi_1","metadata":{"provider_id":"p1"}}}}`)
+	payload := []byte(`{"id":"evt_9","type":"payment_intent.succeeded","data":{"object":{
+		"id":"pi_1","amount":30000,"amount_received":30000,"currency":"THB","status":"succeeded",
+		"metadata":{"topup_id":"8e6a1d56-8b0e-4f5b-8f2c-0b7a1b6c2d3e","provider_id":"p1"}}}}`)
 	ev, err := c.ParseWebhook(payload, Sign(payload, secret, now), now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.Type != "checkout.session.completed" || ev.SessionID != "cs_test_1" || ev.Amount != 30000 || ev.Currency != "thb" ||
-		ev.PaymentStatus != "paid" || ev.PaymentIntentID == nil || *ev.PaymentIntentID != "pi_1" || ev.Metadata["provider_id"] != "p1" {
+	if ev.Type != "payment_intent.succeeded" || ev.PaymentIntentID != "pi_1" || ev.Amount != 30000 || ev.Currency != "thb" ||
+		ev.Status != "succeeded" || ev.TopupRef != "8e6a1d56-8b0e-4f5b-8f2c-0b7a1b6c2d3e" || ev.Metadata["provider_id"] != "p1" {
 		t.Fatalf("decoded %+v", ev)
 	}
 	if _, err := c.ParseWebhook(payload, Sign(payload, "whsec_forged", now), now); !isUnauthorized(err) {
 		t.Fatalf("forged event must not decode, got %v", err)
+	}
+	// A success counts what was actually received.
+	short := []byte(`{"id":"evt_s","type":"payment_intent.succeeded","data":{"object":{"id":"pi_2","amount":30000,"amount_received":100,"currency":"thb","status":"succeeded"}}}`)
+	if ev, _ := c.ParseWebhook(short, Sign(short, secret, now), now); ev.Amount != 100 {
+		t.Fatalf("amount received = %d, want 100", ev.Amount)
 	}
 }
 
@@ -80,49 +85,66 @@ func TestParseWebhookChargeRefunded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.PaymentStatus != "refunded" || ev.PaymentIntentID == nil || *ev.PaymentIntentID != "pi_7" {
+	if ev.Status != "refunded" || ev.PaymentIntentID != "pi_7" {
 		t.Fatalf("decoded %+v", ev)
 	}
 }
 
-func TestCreateCheckoutSendsServerAmount(t *testing.T) {
+func TestCreatePromptPayIsPromptPayOnlyWithServerAmount(t *testing.T) {
 	var got url.Values
 	var auth, idem string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/payment_intents" {
+			t.Errorf("path %s", r.URL.Path)
+		}
 		body, _ := io.ReadAll(r.Body)
 		got, _ = url.ParseQuery(string(body))
 		auth, idem = r.Header.Get("Authorization"), r.Header.Get("Idempotency-Key")
-		_, _ = w.Write([]byte(`{"id":"cs_test_42","url":"https://checkout.stripe.com/c/pay/cs_test_42"}`))
+		_, _ = w.Write([]byte(`{"id":"pi_42","status":"requires_action","next_action":{"type":"promptpay_display_qr_code",
+			"promptpay_display_qr_code":{"data":"00020101021230…6304ABCD","image_url_png":"https://qr.stripe.com/x.png","hosted_instructions_url":"https://pay.stripe.com/x"}}}`))
 	}))
 	defer srv.Close()
 	c := New(srv.URL, "sk_test_abc", secret, time.Second)
 	topup := uuid.New()
-	sess, err := c.CreateCheckout(context.Background(), ports.CheckoutRequest{
+	charge, err := c.CreatePromptPay(context.Background(), ports.PromptPayRequest{
 		TopupID: topup, ProviderID: uuid.New(), PackageID: "standard", Amount: 30000, Currency: "thb",
-		Description: "FloodNow provider credit", SuccessURL: "https://app/?topup=x", CancelURL: "https://app/?topup=x&topup_cancelled=1",
+		Description: "FloodNow provider credit", Email: "shop@example.com",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sess.ID != "cs_test_42" || !strings.HasPrefix(sess.URL, "https://checkout.stripe.com/") {
-		t.Fatalf("session %+v", sess)
+	if charge.PaymentIntentID != "pi_42" || charge.QRData == "" || charge.QRImageURL != "https://qr.stripe.com/x.png" {
+		t.Fatalf("charge %+v", charge)
 	}
 	if auth != "Bearer sk_test_abc" || idem != "topup-"+topup.String() {
 		t.Fatalf("auth=%q idempotency=%q", auth, idem)
 	}
-	if got.Get("mode") != "payment" || got.Get("line_items[0][price_data][unit_amount]") != "30000" ||
-		got.Get("line_items[0][price_data][currency]") != "thb" || got.Get("client_reference_id") != topup.String() {
+	if got["payment_method_types[]"][0] != "promptpay" || len(got["payment_method_types[]"]) != 1 || got.Get("payment_method_data[type]") != "promptpay" ||
+		got.Get("amount") != "30000" || got.Get("currency") != "thb" || got.Get("confirm") != "true" ||
+		got.Get("payment_method_data[billing_details][email]") != "shop@example.com" || got.Get("metadata[topup_id]") != topup.String() {
 		t.Fatalf("form %v", got)
 	}
 }
 
-func TestCreateCheckoutUpstreamErrorIsUnavailable(t *testing.T) {
+func TestCreatePromptPayWithoutQRIsUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"nope"}}`))
+		_, _ = w.Write([]byte(`{"id":"pi_x","status":"requires_payment_method","next_action":null}`))
 	}))
 	defer srv.Close()
-	_, err := New(srv.URL, "sk", secret, time.Second).CreateCheckout(context.Background(), ports.CheckoutRequest{TopupID: uuid.New(), Amount: 100, Currency: "thb"})
+	_, err := New(srv.URL, "sk", secret, time.Second).CreatePromptPay(context.Background(), ports.PromptPayRequest{TopupID: uuid.New(), Amount: 100, Currency: "thb"})
+	var ae *apperr.Error
+	if !errors.As(err, &ae) || ae.Code != apperr.CodeUnavailable {
+		t.Fatalf("want UPSTREAM_UNAVAILABLE, got %v", err)
+	}
+}
+
+func TestCreatePromptPayUpstreamErrorIsUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"payment_method_unactivated","message":"nope"}}`))
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "sk", secret, time.Second).CreatePromptPay(context.Background(), ports.PromptPayRequest{TopupID: uuid.New(), Amount: 100, Currency: "thb"})
 	var ae *apperr.Error
 	if !errors.As(err, &ae) || ae.Code != apperr.CodeUnavailable {
 		t.Fatalf("want UPSTREAM_UNAVAILABLE, got %v", err)

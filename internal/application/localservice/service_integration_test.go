@@ -72,10 +72,12 @@ func setup(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	// Stripe stand-in: Checkout create returns a session per call.
+	// Stripe stand-in: a PromptPay PaymentIntent with its QR per call.
 	stripeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
-		fmt.Fprintf(w, `{"id":"cs_%s","url":"https://checkout.stripe.test/%s"}`, r.PostForm.Get("client_reference_id"), r.PostForm.Get("client_reference_id"))
+		ref := r.PostForm.Get("metadata[topup_id]")
+		fmt.Fprintf(w, `{"id":"pi_%s","status":"requires_action","next_action":{"type":"promptpay_display_qr_code",
+			"promptpay_display_qr_code":{"data":"000201-%s","image_url_png":"https://qr.stripe.test/%s.png"}}}`, ref, ref, ref)
 	}))
 	t.Cleanup(stripeAPI.Close)
 
@@ -85,9 +87,8 @@ func setup(t *testing.T) *fixture {
 			CreditEnabled: true, MatchFee: 20, WelcomeCredit: 30,
 			ConfirmTimeout: 10 * time.Minute, RequestTTL: 2 * time.Hour, RefundGrace: 10 * time.Minute,
 		},
-		Packages:  []ls.Package{{ID: "standard", THB: 300, Credits: 330}},
-		Payments:  stripe.New(stripeAPI.URL, "sk_test", webhookSecret, 5*time.Second),
-		ReturnURL: "https://app.test/",
+		Packages: []ls.Package{{ID: "standard", THB: 300, Credits: 330}},
+		Payments: stripe.New(stripeAPI.URL, "sk_test", webhookSecret, 5*time.Second),
 	})
 	// A random spot so runs don't see each other's requests.
 	lat := 5 + float64(time.Now().UnixNano()%1_000_000)/100_000
@@ -326,31 +327,31 @@ func TestInsufficientCreditThenStripeTopUp(t *testing.T) {
 		t.Fatal("a refused accept must leave the selection pending, with no match")
 	}
 
-	// Top up via Stripe. Starting it credits nothing.
-	topup, url, err := f.svc.StartTopup(f.ctx, owner, "standard")
-	if err != nil || url == "" || topup.Amount != 30000 || topup.CreditAmount != 330 {
+	// Top up via PromptPay. Showing the QR credits nothing.
+	topup, err := f.svc.StartTopup(f.ctx, owner, "tow@test.invalid", "standard")
+	if err != nil || topup.Amount != 30000 || topup.CreditAmount != 330 || topup.PromptPayQRData == nil || topup.StripePaymentIntentID == nil {
 		t.Fatalf("start topup: %v %+v", err, topup)
 	}
-	if _, _, err := f.svc.StartTopup(f.ctx, owner, "free-money"); code(err) != apperr.CodeValidation {
+	if _, err := f.svc.StartTopup(f.ctx, owner, "tow@test.invalid", "free-money"); code(err) != apperr.CodeValidation {
 		t.Fatalf("unknown package must be refused, got %v", err)
 	}
 	if f.balance(prov.ID) != 10 {
-		t.Fatal("creating a checkout must not credit")
+		t.Fatal("creating a PromptPay QR must not credit")
 	}
-	session := "cs_" + topup.ID.String()
+	pi := *topup.StripePaymentIntentID
 
 	// Forged signature: rejected, nothing credited.
-	paid := webhook("checkout.session.completed", session, topup.ID, 30000, "paid")
+	paid := webhook("payment_intent.succeeded", pi, topup.ID, 30000, "succeeded")
 	if err := f.svc.HandlePaymentWebhook(f.ctx, paid, stripe.Sign(paid, "whsec_forged", f.clk.Now())); code(err) != apperr.CodeUnauthorized {
 		t.Fatalf("forged webhook must be rejected, got %v", err)
 	}
 	// Wrong amount: acknowledged but not credited.
-	cheap := webhook("checkout.session.completed", session, topup.ID, 100, "paid")
+	cheap := webhook("payment_intent.succeeded", pi, topup.ID, 100, "succeeded")
 	if err := f.svc.HandlePaymentWebhook(f.ctx, cheap, stripe.Sign(cheap, webhookSecret, f.clk.Now())); err != nil {
 		t.Fatal(err)
 	}
-	// Unpaid completion (async method still processing): nothing yet.
-	unpaid := webhook("checkout.session.completed", session, topup.ID, 30000, "unpaid")
+	// Another PaymentIntent pretending to be this top-up: nothing.
+	unpaid := webhook("payment_intent.succeeded", "pi_someone_else", topup.ID, 30000, "succeeded")
 	if err := f.svc.HandlePaymentWebhook(f.ctx, unpaid, stripe.Sign(unpaid, webhookSecret, f.clk.Now())); err != nil {
 		t.Fatal(err)
 	}
@@ -366,8 +367,8 @@ func TestInsufficientCreditThenStripeTopUp(t *testing.T) {
 	if f.balance(prov.ID) != 340 || f.ledger(prov.ID, ls.TxTopUp) != 1 {
 		t.Fatalf("duplicate webhooks must credit once; balance=%d", f.balance(prov.ID))
 	}
-	// A late "expired" never downgrades a paid top-up.
-	expired := webhook("checkout.session.expired", session, topup.ID, 30000, "unpaid")
+	// A late "canceled" never downgrades a paid top-up.
+	expired := webhook("payment_intent.canceled", pi, topup.ID, 30000, "canceled")
 	_ = f.svc.HandlePaymentWebhook(f.ctx, expired, stripe.Sign(expired, webhookSecret, f.clk.Now()))
 	if tp, _ := f.svc.Topup(f.ctx, owner, topup.ID); tp.Status != ls.TopupPaid {
 		t.Fatalf("paid top-up changed to %s", tp.Status)
@@ -400,14 +401,14 @@ func TestInsufficientCreditThenStripeTopUp(t *testing.T) {
 		t.Fatal("no refund once the provider set off")
 	}
 
-	// An expired then paid (late) checkout still credits: the money was taken.
-	t2, _, err := f.svc.StartTopup(f.ctx, owner, "standard")
+	// A failed (QR timed out) then succeeded (late) payment still credits: the money was taken.
+	t2, err := f.svc.StartTopup(f.ctx, owner, "tow@test.invalid", "standard")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2 := "cs_" + t2.ID.String()
-	exp2 := webhook("checkout.session.expired", s2, t2.ID, 30000, "unpaid")
-	paid2 := webhook("checkout.session.async_payment_succeeded", s2, t2.ID, 30000, "paid")
+	s2 := *t2.StripePaymentIntentID
+	exp2 := webhook("payment_intent.payment_failed", s2, t2.ID, 30000, "requires_payment_method")
+	paid2 := webhook("payment_intent.succeeded", s2, t2.ID, 30000, "succeeded")
 	_ = f.svc.HandlePaymentWebhook(f.ctx, exp2, stripe.Sign(exp2, webhookSecret, f.clk.Now()))
 	if err := f.svc.HandlePaymentWebhook(f.ctx, paid2, stripe.Sign(paid2, webhookSecret, f.clk.Now())); err != nil {
 		t.Fatal(err)
@@ -473,7 +474,7 @@ func containsRequest(items []ports.RequestWithDistance, id uuid.UUID) bool {
 	return false
 }
 
-func webhook(typ, session string, topupID uuid.UUID, amount int, status string) []byte {
-	return fmt.Appendf(nil, `{"id":"evt_%s","type":%q,"data":{"object":{"id":%q,"client_reference_id":%q,"amount_total":%d,"currency":"thb","payment_status":%q,"payment_intent":"pi_%s"}}}`,
-		uuid.NewString(), typ, session, topupID, amount, status, topupID)
+func webhook(typ, paymentIntent string, topupID uuid.UUID, amount int, status string) []byte {
+	return fmt.Appendf(nil, `{"id":"evt_%s","type":%q,"data":{"object":{"id":%q,"amount":%d,"amount_received":%d,"currency":"thb","status":%q,"metadata":{"topup_id":%q}}}}`,
+		uuid.NewString(), typ, paymentIntent, amount, amount, status, topupID)
 }

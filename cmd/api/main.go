@@ -272,11 +272,11 @@ func newLocalServiceService(c config.LocalServicesConfig, db *sql.DB, clk clock.
 		log.Printf("PROVIDER_TOPUP_PACKAGES invalid (%v); using defaults", err)
 		pkgs = domainlocalservice.DefaultPackages
 	}
-	svcCfg := applocalservice.Config{Policy: policy, Packages: pkgs, ReturnURL: c.StripeReturnURL}
+	svcCfg := applocalservice.Config{Policy: policy, Packages: pkgs}
 	if c.StripeEnabled {
 		svcCfg.Payments = stripe.New(c.StripeAPIBase, c.StripeSecretKey, c.StripeWebhookSecret, 8*time.Second)
 	}
-	log.Printf("local services enabled: credit=%v match_fee=%d stripe_topups=%v", policy.CreditEnabled, policy.MatchFee, svcCfg.Payments != nil)
+	log.Printf("local services enabled: credit=%v match_fee=%d promptpay_topups=%v", policy.CreditEnabled, policy.MatchFee, svcCfg.Payments != nil)
 	return applocalservice.NewService(postgres.NewLocalServiceRepository(db), clk, svcCfg), nil
 }
 

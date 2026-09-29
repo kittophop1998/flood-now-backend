@@ -33,13 +33,11 @@ const (
 	adminListLimit       = 200
 )
 
-// Config wires the service. Payments nil means Stripe top-ups are off.
+// Config wires the service. Payments nil means PromptPay top-ups are off.
 type Config struct {
 	Policy   ls.BillingPolicy
 	Packages []ls.Package
 	Payments ports.PaymentProvider
-	// ReturnURL is the web page Stripe sends the provider back to.
-	ReturnURL string
 }
 
 type Service struct {

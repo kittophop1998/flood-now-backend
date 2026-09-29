@@ -106,13 +106,12 @@ type LocalServicesConfig struct {
 	// Top-up packages "id:thb:credits,…" (parsed/validated by the domain).
 	Packages string
 
-	// Stripe credit top-ups; needs CreditEnabled and both secrets.
+	// PromptPay credit top-ups through Stripe; needs CreditEnabled and both
+	// secrets (and PromptPay activated on the Stripe account).
 	StripeEnabled       bool
 	StripeSecretKey     string // secret: never logged or sent to clients
 	StripeWebhookSecret string // secret: never logged or sent to clients
 	StripeAPIBase       string
-	// StripeReturnURL is the web page Stripe returns the provider to.
-	StripeReturnURL string
 }
 
 type R2CleanupConfig struct {
@@ -228,7 +227,7 @@ func Load() (*Config, error) {
 	cfg.GISTDA, cfg.GISTDAWarning = loadGISTDA()
 	cfg.DOHCCTV, cfg.DOHCCTVWarning = loadDOHCCTV()
 	cfg.R2Cleanup, cfg.R2CleanupWarning = loadR2Cleanup()
-	cfg.LocalServices, cfg.LocalServicesWarning = loadLocalServices(cfg.WebOrigins, cfg.Production)
+	cfg.LocalServices, cfg.LocalServicesWarning = loadLocalServices()
 
 	if cfg.R2Endpoint == "" && cfg.R2AccountID != "" {
 		cfg.R2Endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.R2AccountID)
@@ -478,7 +477,7 @@ const defaultTopupPackages = "starter:100:100,standard:300:330,pro:500:575"
 
 // loadLocalServices never fails the boot: a bad number/duration falls back
 // to its default, and incomplete Stripe settings turn only top-ups off.
-func loadLocalServices(webOrigins []string, production bool) (LocalServicesConfig, string) {
+func loadLocalServices() (LocalServicesConfig, string) {
 	c := LocalServicesConfig{
 		Enabled:             os.Getenv("SERVICE_PROVIDER_ENABLED") == "true",
 		CreditEnabled:       os.Getenv("PROVIDER_CREDIT_ENABLED") == "true",
@@ -491,7 +490,6 @@ func loadLocalServices(webOrigins []string, production bool) (LocalServicesConfi
 		StripeSecretKey:     strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")),
 		StripeWebhookSecret: strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
 		StripeAPIBase:       strings.TrimRight(getEnv("STRIPE_API_BASE", "https://api.stripe.com"), "/"),
-		StripeReturnURL:     strings.TrimSpace(os.Getenv("STRIPE_RETURN_URL")),
 	}
 	var warnings []string
 	for _, it := range []struct {
@@ -530,12 +528,7 @@ func loadLocalServices(webOrigins []string, production bool) (LocalServicesConfi
 		}
 	}
 
-	if c.StripeReturnURL == "" && len(webOrigins) > 0 {
-		c.StripeReturnURL = webOrigins[0] + "/"
-	}
 	if os.Getenv("STRIPE_TOPUP_ENABLED") == "true" {
-		u, err := url.Parse(c.StripeReturnURL)
-		returnOK := err == nil && u.Host != "" && (u.Scheme == "https" || (!production && u.Scheme == "http"))
 		switch {
 		case !c.Enabled:
 			warnings = append(warnings, "STRIPE_TOPUP_ENABLED needs SERVICE_PROVIDER_ENABLED=true")
@@ -543,8 +536,6 @@ func loadLocalServices(webOrigins []string, production bool) (LocalServicesConfi
 			warnings = append(warnings, "STRIPE_TOPUP_ENABLED needs PROVIDER_CREDIT_ENABLED=true")
 		case c.StripeSecretKey == "" || c.StripeWebhookSecret == "":
 			warnings = append(warnings, "STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are required for top-ups")
-		case !returnOK:
-			warnings = append(warnings, "STRIPE_RETURN_URL must be an https URL (http allowed in development)")
 		default:
 			c.StripeEnabled = true
 		}

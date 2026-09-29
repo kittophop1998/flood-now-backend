@@ -392,11 +392,22 @@ type topupDTO struct {
 	Status       string     `json:"status"`
 	PaidAt       *time.Time `json:"paid_at"`
 	CreatedAt    time.Time  `json:"created_at"`
+	// The QR to scan — only while the top-up is still pending.
+	PromptPay *promptPayDTO `json:"promptpay"`
+}
+
+type promptPayDTO struct {
+	QRData     string  `json:"qr_data"`
+	QRImageURL *string `json:"qr_image_url"`
 }
 
 func toTopupDTO(t ls.Topup) topupDTO {
-	return topupDTO{ID: t.ID.String(), PackageID: t.PackageID, AmountTHB: float64(t.Amount) / 100, CreditAmount: t.CreditAmount,
+	out := topupDTO{ID: t.ID.String(), PackageID: t.PackageID, AmountTHB: float64(t.Amount) / 100, CreditAmount: t.CreditAmount,
 		Status: string(t.Status), PaidAt: utcPtr(t.PaidAt), CreatedAt: t.CreatedAt.UTC()}
+	if t.Status == ls.TopupPending && t.PromptPayQRData != nil {
+		out.PromptPay = &promptPayDTO{QRData: *t.PromptPayQRData, QRImageURL: t.PromptPayQRImageURL}
+	}
+	return out
 }
 
 type packageDTO struct {
@@ -803,12 +814,13 @@ func (h *LocalServiceHandler) StartTopup(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	t, checkoutURL, err := h.service.StartTopup(c.Request.Context(), mustUserID(c), req.PackageID)
+	u := currentUser(c)
+	t, err := h.service.StartTopup(c.Request.Context(), u.ID, u.Email, req.PackageID)
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"topup": toTopupDTO(*t), "checkout_url": checkoutURL})
+	c.JSON(http.StatusCreated, gin.H{"topup": toTopupDTO(*t)})
 }
 
 func (h *LocalServiceHandler) GetTopup(c *gin.Context) {
