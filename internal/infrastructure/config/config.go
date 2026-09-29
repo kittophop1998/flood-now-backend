@@ -84,6 +84,35 @@ type Config struct {
 	// R2CleanupWarning says why.
 	R2Cleanup        R2CleanupConfig
 	R2CleanupWarning string
+
+	// Local services (commercial providers, service requests, provider
+	// credit, Stripe top-ups). Off unless SERVICE_PROVIDER_ENABLED=true; an
+	// invalid value never fails boot — it falls back to its default (or
+	// turns top-ups off) and LocalServicesWarning says why.
+	LocalServices        LocalServicesConfig
+	LocalServicesWarning string
+}
+
+type LocalServicesConfig struct {
+	Enabled bool
+	// CreditEnabled: deduct the match fee from provider credit. Off = the
+	// fee is recorded as waived.
+	CreditEnabled  bool
+	MatchFee       int
+	WelcomeCredit  int
+	ConfirmTimeout time.Duration
+	RequestTTL     time.Duration
+	RefundGrace    time.Duration
+	// Top-up packages "id:thb:credits,…" (parsed/validated by the domain).
+	Packages string
+
+	// Stripe credit top-ups; needs CreditEnabled and both secrets.
+	StripeEnabled       bool
+	StripeSecretKey     string // secret: never logged or sent to clients
+	StripeWebhookSecret string // secret: never logged or sent to clients
+	StripeAPIBase       string
+	// StripeReturnURL is the web page Stripe returns the provider to.
+	StripeReturnURL string
 }
 
 type R2CleanupConfig struct {
@@ -199,6 +228,7 @@ func Load() (*Config, error) {
 	cfg.GISTDA, cfg.GISTDAWarning = loadGISTDA()
 	cfg.DOHCCTV, cfg.DOHCCTVWarning = loadDOHCCTV()
 	cfg.R2Cleanup, cfg.R2CleanupWarning = loadR2Cleanup()
+	cfg.LocalServices, cfg.LocalServicesWarning = loadLocalServices(cfg.WebOrigins, cfg.Production)
 
 	if cfg.R2Endpoint == "" && cfg.R2AccountID != "" {
 		cfg.R2Endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.R2AccountID)
@@ -441,6 +471,84 @@ func loadR2Cleanup() (R2CleanupConfig, string) {
 		}
 	}
 
+	return c, strings.Join(warnings, "; ")
+}
+
+const defaultTopupPackages = "starter:100:100,standard:300:330,pro:500:575"
+
+// loadLocalServices never fails the boot: a bad number/duration falls back
+// to its default, and incomplete Stripe settings turn only top-ups off.
+func loadLocalServices(webOrigins []string, production bool) (LocalServicesConfig, string) {
+	c := LocalServicesConfig{
+		Enabled:             os.Getenv("SERVICE_PROVIDER_ENABLED") == "true",
+		CreditEnabled:       os.Getenv("PROVIDER_CREDIT_ENABLED") == "true",
+		MatchFee:            20,
+		WelcomeCredit:       100,
+		ConfirmTimeout:      10 * time.Minute,
+		RequestTTL:          2 * time.Hour,
+		RefundGrace:         10 * time.Minute,
+		Packages:            getEnv("PROVIDER_TOPUP_PACKAGES", defaultTopupPackages),
+		StripeSecretKey:     strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")),
+		StripeWebhookSecret: strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
+		StripeAPIBase:       strings.TrimRight(getEnv("STRIPE_API_BASE", "https://api.stripe.com"), "/"),
+		StripeReturnURL:     strings.TrimSpace(os.Getenv("STRIPE_RETURN_URL")),
+	}
+	var warnings []string
+	for _, it := range []struct {
+		key      string
+		dst      *int
+		min, max int
+	}{
+		{"MATCH_FEE_CREDITS", &c.MatchFee, 0, 100_000},
+		{"PROVIDER_WELCOME_CREDITS", &c.WelcomeCredit, 0, 100_000},
+	} {
+		if raw := os.Getenv(it.key); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < it.min || n > it.max {
+				warnings = append(warnings, fmt.Sprintf("%s=%q is invalid (%d-%d), using %d", it.key, raw, it.min, it.max, *it.dst))
+			} else {
+				*it.dst = n
+			}
+		}
+	}
+	for _, it := range []struct {
+		key      string
+		dst      *time.Duration
+		min, max time.Duration
+	}{
+		{"PROVIDER_CONFIRM_TIMEOUT", &c.ConfirmTimeout, time.Minute, 2 * time.Hour},
+		{"SERVICE_REQUEST_TTL", &c.RequestTTL, 10 * time.Minute, 7 * 24 * time.Hour},
+		{"MATCH_REFUND_GRACE", &c.RefundGrace, 0, 24 * time.Hour},
+	} {
+		if raw := os.Getenv(it.key); raw != "" {
+			d, err := time.ParseDuration(raw)
+			if err != nil || d < it.min || d > it.max {
+				warnings = append(warnings, fmt.Sprintf("%s=%q is invalid (%s-%s), using %s", it.key, raw, it.min, it.max, *it.dst))
+			} else {
+				*it.dst = d
+			}
+		}
+	}
+
+	if c.StripeReturnURL == "" && len(webOrigins) > 0 {
+		c.StripeReturnURL = webOrigins[0] + "/"
+	}
+	if os.Getenv("STRIPE_TOPUP_ENABLED") == "true" {
+		u, err := url.Parse(c.StripeReturnURL)
+		returnOK := err == nil && u.Host != "" && (u.Scheme == "https" || (!production && u.Scheme == "http"))
+		switch {
+		case !c.Enabled:
+			warnings = append(warnings, "STRIPE_TOPUP_ENABLED needs SERVICE_PROVIDER_ENABLED=true")
+		case !c.CreditEnabled:
+			warnings = append(warnings, "STRIPE_TOPUP_ENABLED needs PROVIDER_CREDIT_ENABLED=true")
+		case c.StripeSecretKey == "" || c.StripeWebhookSecret == "":
+			warnings = append(warnings, "STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are required for top-ups")
+		case !returnOK:
+			warnings = append(warnings, "STRIPE_RETURN_URL must be an https URL (http allowed in development)")
+		default:
+			c.StripeEnabled = true
+		}
+	}
 	return c, strings.Join(warnings, "; ")
 }
 

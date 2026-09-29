@@ -28,6 +28,8 @@ func statusForCode(code apperr.Code) int {
 		return http.StatusForbidden
 	case apperr.CodeRateLimited:
 		return http.StatusTooManyRequests
+	case apperr.CodeInsufficientCredit:
+		return http.StatusPaymentRequired
 	default:
 		return http.StatusInternalServerError
 	}

@@ -33,6 +33,9 @@ type Deps struct {
 	CCTVHandler           *CCTVHandler
 	AuthHandler           *AuthHandler
 	EventHandler          *EventHandler
+	// LocalServiceHandler is nil when local services are disabled: its
+	// routes don't exist (404).
+	LocalServiceHandler *LocalServiceHandler
 	// AuthService resolves user session tokens; nil means nobody is ever
 	// signed in (tests that don't need accounts).
 	AuthService *appauth.Service
@@ -149,6 +152,39 @@ func NewRouter(deps Deps) *gin.Engine {
 		v1.GET("/cctv", deps.CCTVHandler.List)
 		v1.GET("/cctv/nearby", deps.CCTVHandler.Nearby)
 		v1.GET("/cctv/:id", deps.CCTVHandler.Get)
+
+		// Local services — commercial, separate from SOS/helpers. Browsing
+		// providers is public; everything else needs a session.
+		if ls := deps.LocalServiceHandler; ls != nil {
+			v1.GET("/service-providers", ls.ListProviders)
+			v1.GET("/service-providers/:id", ls.GetProvider)
+
+			v1.POST("/service-requests", requireAuth, ls.CreateRequest)
+			v1.GET("/service-requests/mine", requireAuth, ls.MyRequests)
+			v1.GET("/service-requests/:id", requireAuth, ls.GetRequest)
+			v1.POST("/service-requests/:id/offers/:offer_id/select", requireAuth, ls.SelectOffer)
+			v1.POST("/service-requests/:id/status", requireAuth, ls.UpdateStatus)
+			v1.POST("/service-requests/:id/cancel", requireAuth, ls.Cancel)
+			v1.POST("/service-requests/:id/issues", requireAuth, ls.ReportIssue)
+
+			provider := v1.Group("/provider", requireAuth, noStore)
+			provider.GET("/me", ls.GetMyProvider)
+			provider.PUT("/me", ls.SaveMyProvider)
+			provider.POST("/me/availability", ls.SetAvailability)
+			provider.GET("/requests/nearby", ls.NearbyRequests)
+			provider.POST("/requests/:id/dismiss", ls.Dismiss)
+			provider.POST("/requests/:id/offer", ls.SendOffer)
+			provider.GET("/offers", ls.MyOffers)
+			provider.POST("/offers/:id/accept", ls.AcceptOffer)
+			provider.POST("/offers/:id/reject", ls.RejectOffer)
+			provider.GET("/jobs", ls.MyJobs)
+			provider.GET("/wallet", ls.Wallet)
+			provider.POST("/wallet/topups", ls.StartTopup)
+			provider.GET("/wallet/topups/:id", ls.GetTopup)
+
+			// Authenticated by Stripe's signature, not a session.
+			v1.POST("/payments/stripe/webhook", ls.StripeWebhook)
+		}
 	}
 
 	// Operator endpoints: moderation queue, announcements, important places.
@@ -168,6 +204,14 @@ func NewRouter(deps Deps) *gin.Engine {
 		admin.POST("/important-places", deps.ImportantPlaceHandler.Create)
 		admin.PATCH("/important-places/:id", deps.ImportantPlaceHandler.Update)
 		admin.DELETE("/important-places/:id", deps.ImportantPlaceHandler.Delete)
+
+		if ls := deps.LocalServiceHandler; ls != nil {
+			admin.GET("/providers", ls.AdminProviders)
+			admin.POST("/providers/:id/verification", ls.AdminVerify)
+			admin.POST("/providers/:id/status", ls.AdminSetStatus)
+			admin.POST("/providers/:id/credit-adjustments", ls.AdminAdjustCredit)
+			admin.GET("/service-issues", ls.AdminIssues)
+		}
 	}
 
 	return r

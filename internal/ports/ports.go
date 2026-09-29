@@ -13,6 +13,7 @@ import (
 	"floodnow-api/internal/domain/event"
 	"floodnow-api/internal/domain/follow"
 	"floodnow-api/internal/domain/importantplace"
+	"floodnow-api/internal/domain/localservice"
 	"floodnow-api/internal/domain/moderation"
 	"floodnow-api/internal/domain/officialflood"
 	"floodnow-api/internal/domain/place"
@@ -463,4 +464,240 @@ type EventRepository interface {
 	Create(ctx context.Context, e *event.Event) error
 	Update(ctx context.Context, e *event.Event) error
 	Delete(ctx context.Context, id uuid.UUID) error
+}
+
+// ProviderQuery selects active service providers around a point for the
+// public browse list: available first, then nearest.
+type ProviderQuery struct {
+	Latitude, Longitude float64
+	RadiusM             float64
+	Category            *localservice.Category
+	// Text matches the name/description (case-insensitive substring).
+	Text          string
+	AvailableOnly bool
+	Limit         int
+}
+
+// ProviderWithDistance is a provider plus its base's distance from the
+// query point.
+type ProviderWithDistance struct {
+	localservice.Provider
+	DistanceM float64
+}
+
+// OpenRequestQuery selects requests a provider could make an offer on:
+// still taking offers at Now, one of Categories, within RadiusM of the
+// provider's base, not the provider's own, not dismissed by them.
+type OpenRequestQuery struct {
+	ProviderID          uuid.UUID
+	ExcludeCustomerID   uuid.UUID
+	Latitude, Longitude float64
+	RadiusM             float64
+	Categories          []localservice.Category
+	Now                 time.Time
+	Limit               int
+}
+
+// RequestWithDistance is a request plus its distance from the provider's
+// base and the provider's own offer on it, if any.
+type RequestWithDistance struct {
+	localservice.Request
+	DistanceM float64
+	MyOffer   *localservice.Offer
+}
+
+// OfferWithProvider is an offer as the customer compares it.
+type OfferWithProvider struct {
+	localservice.Offer
+	Provider localservice.Provider
+	// DistanceM from the provider's base to the request point.
+	DistanceM float64
+}
+
+// OfferWithRequest is an offer as its provider tracks it.
+type OfferWithRequest struct {
+	localservice.Offer
+	Request   localservice.Request
+	DistanceM float64
+}
+
+// MatchWithRequest is a provider's job.
+type MatchWithRequest struct {
+	localservice.Match
+	Request      localservice.Request
+	Offer        localservice.Offer
+	CustomerName string
+}
+
+// SelectOfferParams: the customer picks an offer. No credit moves.
+type SelectOfferParams struct {
+	RequestID, OfferID, CustomerID uuid.UUID
+	Now, Deadline                  time.Time
+}
+
+// AcceptOfferParams: the selected provider confirms. With Charge the fee
+// is deducted in the same transaction that creates the match.
+type AcceptOfferParams struct {
+	OfferID, ProviderID, MatchID uuid.UUID
+	Fee                          int
+	Charge                       bool
+	Now                          time.Time
+}
+
+// AcceptResult is the created (or, for a repeated accept, existing) match.
+type AcceptResult struct {
+	Match           localservice.Match
+	AlreadyAccepted bool
+}
+
+// JobTransition is a post-match status change (compare-and-set).
+type JobTransition struct {
+	RequestID uuid.UUID
+	From, To  localservice.Status
+	Actor     localservice.Role
+	Now       time.Time
+}
+
+// CancelParams cancels a request (customer) or backs out of a job
+// (provider). Reopen puts the request back to open with ReopenExpiresAt;
+// Refund, when set, is applied in the same transaction.
+type CancelParams struct {
+	RequestID       uuid.UUID
+	From            localservice.Status
+	Actor           localservice.Role
+	Reason          localservice.CancelReason
+	Note            *string
+	Now             time.Time
+	Reopen          bool
+	ReopenExpiresAt time.Time
+	Refund          *localservice.LedgerEntry
+}
+
+// TopupPaid is a verified "payment succeeded" for a top-up. The repository
+// credits the wallet only if the stored top-up matches it exactly.
+type TopupPaid struct {
+	TopupID         uuid.UUID
+	SessionID       string
+	PaymentIntentID *string
+	Amount          int
+	Currency        string
+	Now             time.Time
+}
+
+type LocalServiceRepository interface {
+	// Providers.
+	GetProvider(ctx context.Context, id uuid.UUID) (*localservice.Provider, error)
+	GetProviderByOwner(ctx context.Context, userID uuid.UUID) (*localservice.Provider, error)
+	// CreateProvider inserts p and, when welcome is set, its welcome credit
+	// in one transaction. CONFLICT if the user already has a profile.
+	CreateProvider(ctx context.Context, p *localservice.Provider, welcome *localservice.LedgerEntry) error
+	// UpdateProvider saves profile fields (never balance/verification/status).
+	UpdateProvider(ctx context.Context, p *localservice.Provider) error
+	SetProviderAvailability(ctx context.Context, id uuid.UUID, available bool, now time.Time) error
+	ListProviders(ctx context.Context, q ProviderQuery) ([]ProviderWithDistance, error)
+
+	// Requests.
+	CreateRequest(ctx context.Context, r *localservice.Request) error
+	GetRequest(ctx context.Context, id uuid.UUID) (*localservice.Request, error)
+	FindRequestByClientID(ctx context.Context, customerID uuid.UUID, clientID string) (*localservice.Request, error)
+	CountOpenRequests(ctx context.Context, customerID uuid.UUID, now time.Time) (int, error)
+	ListRequestsByCustomer(ctx context.Context, customerID uuid.UUID, limit int) ([]localservice.Request, error)
+	RequestEvents(ctx context.Context, id uuid.UUID) ([]localservice.Event, error)
+	OpenRequestsNear(ctx context.Context, q OpenRequestQuery) ([]RequestWithDistance, error)
+	DismissRequest(ctx context.Context, requestID, providerID uuid.UUID, now time.Time) error
+
+	// Offers.
+	// UpsertOffer creates the provider's offer or edits their still-pending
+	// one; false when the request no longer takes offers or the offer is
+	// past pending.
+	UpsertOffer(ctx context.Context, o *localservice.Offer, now time.Time) (bool, error)
+	GetOffer(ctx context.Context, id uuid.UUID) (*localservice.Offer, error)
+	OffersForRequest(ctx context.Context, requestID uuid.UUID) ([]OfferWithProvider, error)
+	OffersByProvider(ctx context.Context, providerID uuid.UUID, limit int) ([]OfferWithRequest, error)
+
+	// Matching. Each runs in one transaction with the request row locked
+	// and first brings a stale row up to date (timed-out selection → open,
+	// past expiry → expired).
+	SelectOffer(ctx context.Context, p SelectOfferParams) (bool, error)
+	// RejectSelection: the selected provider declines; the request reopens.
+	RejectSelection(ctx context.Context, offerID, providerID uuid.UUID, now time.Time) (bool, error)
+	// AcceptOffer creates the match, deducts the fee exactly once (ledger
+	// key per offer) and unlocks contact. INSUFFICIENT_CREDIT when the
+	// balance can't pay; CONFLICT when the selection is no longer valid.
+	AcceptOffer(ctx context.Context, p AcceptOfferParams) (*AcceptResult, error)
+	CurrentMatch(ctx context.Context, requestID uuid.UUID) (*localservice.Match, error)
+	MatchesByProvider(ctx context.Context, providerID uuid.UUID, limit int) ([]MatchWithRequest, error)
+	CustomerName(ctx context.Context, userID uuid.UUID) (string, error)
+	TransitionJob(ctx context.Context, t JobTransition) (bool, error)
+	Cancel(ctx context.Context, p CancelParams) (bool, error)
+	CreateIssue(ctx context.Context, i *localservice.Issue) error
+	ListIssues(ctx context.Context, limit int) ([]localservice.Issue, error)
+
+	// Wallet.
+	Transactions(ctx context.Context, providerID uuid.UUID, limit int) ([]localservice.Transaction, error)
+	CreateTopup(ctx context.Context, t *localservice.Topup) error
+	SetTopupSession(ctx context.Context, id uuid.UUID, sessionID string, now time.Time) error
+	GetTopup(ctx context.Context, id uuid.UUID) (*localservice.Topup, error)
+	GetTopupBySession(ctx context.Context, sessionID string) (*localservice.Topup, error)
+	RecentTopups(ctx context.Context, providerID uuid.UUID, limit int) ([]localservice.Topup, error)
+	// MarkTopupPaid credits the wallet exactly once for a verified payment.
+	// credited is false for a repeat (already paid) or a mismatch.
+	MarkTopupPaid(ctx context.Context, p TopupPaid) (credited bool, err error)
+	// MarkTopup moves a still-pending top-up to failed/expired (never a paid one).
+	MarkTopup(ctx context.Context, id uuid.UUID, to localservice.TopupStatus, now time.Time) error
+	// MarkTopupRefundedByPaymentIntent records a Stripe-side refund of a
+	// paid top-up. It moves no credit (an operator adjusts it explicitly).
+	MarkTopupRefundedByPaymentIntent(ctx context.Context, paymentIntentID string, now time.Time) (*localservice.Topup, error)
+	// AdjustCredit applies an operator adjustment; CONFLICT if it would
+	// make the balance negative.
+	AdjustCredit(ctx context.Context, e localservice.LedgerEntry) (*localservice.Transaction, error)
+
+	// Operator.
+	ListAllProviders(ctx context.Context, limit int) ([]localservice.Provider, error)
+	SetProviderVerified(ctx context.Context, id uuid.UUID, verifiedAt *time.Time, now time.Time) error
+	SetProviderStatus(ctx context.Context, id uuid.UUID, status localservice.ProviderStatus, now time.Time) error
+}
+
+// CheckoutRequest asks the payment provider for a hosted checkout page for
+// one top-up. Amount/currency come from the server's package table.
+type CheckoutRequest struct {
+	TopupID     uuid.UUID
+	ProviderID  uuid.UUID
+	PackageID   string
+	Amount      int
+	Currency    string
+	Description string
+	SuccessURL  string
+	CancelURL   string
+}
+
+// CheckoutSession is the hosted page the provider is sent to.
+type CheckoutSession struct {
+	ID  string
+	URL string
+}
+
+// PaymentEvent is a verified (signature-checked) payment webhook, reduced
+// to what the wallet needs.
+type PaymentEvent struct {
+	ID              string
+	Type            string
+	SessionID       string
+	PaymentIntentID *string
+	// ClientReference is our top-up id as we sent it.
+	ClientReference string
+	Amount          int
+	Currency        string
+	PaymentStatus   string
+	// Metadata is correlation only; trusted values come from our own record.
+	Metadata map[string]string
+}
+
+// PaymentProvider is the Stripe boundary (credit top-ups only — never a
+// customer's payment for a service).
+type PaymentProvider interface {
+	CreateCheckout(ctx context.Context, req CheckoutRequest) (*CheckoutSession, error)
+	// ParseWebhook verifies the signature header over the raw payload and
+	// decodes the event. Any failure is VALIDATION_ERROR/UNAUTHORIZED.
+	ParseWebhook(payload []byte, signatureHeader string, now time.Time) (*PaymentEvent, error)
 }

@@ -19,6 +19,7 @@ import (
 	"floodnow-api/internal/adapters/outbound/routing"
 	"floodnow-api/internal/adapters/outbound/security"
 	"floodnow-api/internal/adapters/outbound/storage"
+	"floodnow-api/internal/adapters/outbound/stripe"
 	appannouncement "floodnow-api/internal/application/announcement"
 	appauth "floodnow-api/internal/application/auth"
 	appcctv "floodnow-api/internal/application/cctv"
@@ -26,6 +27,7 @@ import (
 	appfollow "floodnow-api/internal/application/follow"
 	appimagecleanup "floodnow-api/internal/application/imagecleanup"
 	appimportantplace "floodnow-api/internal/application/importantplace"
+	applocalservice "floodnow-api/internal/application/localservice"
 	appmoderation "floodnow-api/internal/application/moderation"
 	appofficialflood "floodnow-api/internal/application/officialflood"
 	appplace "floodnow-api/internal/application/place"
@@ -35,6 +37,7 @@ import (
 	appupload "floodnow-api/internal/application/upload"
 	"floodnow-api/internal/domain/donation"
 	domainimagecleanup "floodnow-api/internal/domain/imagecleanup"
+	domainlocalservice "floodnow-api/internal/domain/localservice"
 	"floodnow-api/internal/domain/moderation"
 	domainreport "floodnow-api/internal/domain/report"
 	"floodnow-api/internal/infrastructure/clock"
@@ -102,6 +105,9 @@ func run() error {
 	if cfg.AdminToken == "" {
 		log.Printf("admin API disabled (ADMIN_TOKEN not set)")
 	}
+	if cfg.LocalServicesWarning != "" {
+		log.Printf("local services config: %s", cfg.LocalServicesWarning)
+	}
 	if cfg.R2CleanupWarning != "" {
 		log.Printf("R2 image cleanup config: %s", cfg.R2CleanupWarning)
 	}
@@ -124,6 +130,17 @@ func run() error {
 	announcementRepo := postgres.NewAnnouncementRepository(db)
 	announcementService := appannouncement.NewService(announcementRepo, realClock)
 	moderationService := appmoderation.NewService(postgres.NewModerationRepository(db), reportRepo, realClock, modPolicy)
+
+	// nil when local services are off: their routes don't exist and
+	// /config/public reports local_services: null.
+	localServiceService, err := newLocalServiceService(cfg.LocalServices, db, realClock)
+	if err != nil {
+		return err
+	}
+	var localServiceHandler *inboundhttp.LocalServiceHandler
+	if localServiceService != nil {
+		localServiceHandler = inboundhttp.NewLocalServiceHandler(localServiceService, cfg.ImageKitBaseURL, storage.ImageURL)
+	}
 
 	// nil when the cleanup job is disabled: no cron entry is registered and
 	// the API is otherwise unaffected.
@@ -191,11 +208,12 @@ func run() error {
 		ImportantPlaceHandler: inboundhttp.NewImportantPlaceHandler(importantPlaceService),
 		AnnouncementHandler:   inboundhttp.NewAnnouncementHandler(announcementService, realClock, cfg.ImageKitBaseURL, storage.ImageURL),
 		ModerationHandler:     inboundhttp.NewModerationHandler(moderationService, presenter),
-		ConfigHandler:         inboundhttp.NewConfigHandler(donationCfg, floodService != nil, cctvService != nil),
+		ConfigHandler:         inboundhttp.NewConfigHandler(donationCfg, floodService != nil, cctvService != nil).WithLocalServices(localServiceService),
 		OfficialFloodHandler:  inboundhttp.NewOfficialFloodHandler(floodService),
 		CCTVHandler:           inboundhttp.NewCCTVHandler(cctvService),
 		AuthHandler:           inboundhttp.NewAuthHandler(authService, sessionCookie),
 		EventHandler:          inboundhttp.NewEventHandler(eventService, realClock, cfg.ImageKitBaseURL, storage.ImageURL),
+		LocalServiceHandler:   localServiceHandler,
 		AuthService:           authService,
 		SessionCookie:         sessionCookie,
 		WebOrigins:            cfg.WebOrigins,
@@ -232,6 +250,34 @@ func run() error {
 	defer cancel()
 	log.Println("shutting down")
 	return srv.Shutdown(shutdownCtx)
+}
+
+// newLocalServiceService builds the local-services use cases, or nil when
+// they're off. An invalid billing policy is a boot error (it is money);
+// invalid top-up packages fall back to the defaults with a warning.
+func newLocalServiceService(c config.LocalServicesConfig, db *sql.DB, clk clock.Real) (*applocalservice.Service, error) {
+	if !c.Enabled {
+		log.Printf("local services disabled (SERVICE_PROVIDER_ENABLED is not true)")
+		return nil, nil
+	}
+	policy := domainlocalservice.BillingPolicy{
+		CreditEnabled: c.CreditEnabled, MatchFee: c.MatchFee, WelcomeCredit: c.WelcomeCredit,
+		ConfirmTimeout: c.ConfirmTimeout, RequestTTL: c.RequestTTL, RefundGrace: c.RefundGrace,
+	}
+	if err := policy.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid local services config: %w", err)
+	}
+	pkgs, err := domainlocalservice.ParsePackages(c.Packages)
+	if err != nil {
+		log.Printf("PROVIDER_TOPUP_PACKAGES invalid (%v); using defaults", err)
+		pkgs = domainlocalservice.DefaultPackages
+	}
+	svcCfg := applocalservice.Config{Policy: policy, Packages: pkgs, ReturnURL: c.StripeReturnURL}
+	if c.StripeEnabled {
+		svcCfg.Payments = stripe.New(c.StripeAPIBase, c.StripeSecretKey, c.StripeWebhookSecret, 8*time.Second)
+	}
+	log.Printf("local services enabled: credit=%v match_fee=%d stripe_topups=%v", policy.CreditEnabled, policy.MatchFee, svcCfg.Payments != nil)
+	return applocalservice.NewService(postgres.NewLocalServiceRepository(db), clk, svcCfg), nil
 }
 
 // runImageCleanup takes the cross-replica advisory lock before running one

@@ -1,6 +1,7 @@
 package http
 
 import (
+	appls "floodnow-api/internal/application/localservice"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -87,17 +88,30 @@ func (h *ModerationHandler) Apply(c *gin.Context) {
 
 // ConfigHandler serves non-secret runtime configuration for the web app.
 type ConfigHandler struct {
-	donation    *donation.Config
-	gistdaFlood bool
-	dohCCTV     bool
+	donation      *donation.Config
+	gistdaFlood   bool
+	dohCCTV       bool
+	localServices *localServicesConfigResponse
 }
 
 func NewConfigHandler(d *donation.Config, gistdaFlood, dohCCTV bool) *ConfigHandler {
 	return &ConfigHandler{donation: d, gistdaFlood: gistdaFlood, dohCCTV: dohCCTV}
 }
 
+// WithLocalServices advertises local services (nil service = off).
+func (h *ConfigHandler) WithLocalServices(svc *appls.Service) *ConfigHandler {
+	if svc != nil {
+		pol := svc.Policy()
+		h.localServices = &localServicesConfigResponse{
+			CreditEnabled: pol.CreditEnabled, TopupEnabled: svc.TopupsEnabled(), MatchFee: pol.MatchFee,
+			ConfirmTimeoutSeconds: int(pol.ConfirmTimeout.Seconds()), RefundGraceSeconds: int(pol.RefundGrace.Seconds()),
+		}
+	}
+	return h
+}
+
 func (h *ConfigHandler) Public(c *gin.Context) {
-	out := publicConfigResponse{GISTDAFlood: h.gistdaFlood, DOHCCTV: h.dohCCTV}
+	out := publicConfigResponse{GISTDAFlood: h.gistdaFlood, DOHCCTV: h.dohCCTV, LocalServices: h.localServices}
 	if d := h.donation; d != nil {
 		out.Donation = &donationConfigResponse{PromptPayID: d.PromptPayID, IDType: string(d.IDType), RecipientName: d.RecipientName}
 	}

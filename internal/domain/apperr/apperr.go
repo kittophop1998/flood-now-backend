@@ -23,6 +23,8 @@ const (
 	CodeCSRFTokenMissing Code = "CSRF_TOKEN_MISSING"
 	CodeCSRFTokenInvalid Code = "CSRF_TOKEN_INVALID"
 	CodeInvalidOrigin    Code = "INVALID_ORIGIN"
+	// A provider's credit balance can't pay the match fee (local services).
+	CodeInsufficientCredit Code = "INSUFFICIENT_CREDIT"
 )
 
 // Error is the single error type carried across layers. Handlers map it to
@@ -70,6 +72,14 @@ func RateLimited(message string) *Error {
 // CSRF_TOKEN_INVALID, INVALID_ORIGIN).
 func Rejected(code Code, message string) *Error {
 	return &Error{Code: code, Message: message}
+}
+
+// InsufficientCredit refuses a match the provider's balance can't pay for.
+// Fields carry "balance" and "required" (credits) so the client can show
+// them next to a top-up action.
+func InsufficientCredit(balance, required int) *Error {
+	return &Error{Code: CodeInsufficientCredit, Message: "not enough credit to accept this job; top up and accept again",
+		Fields: map[string]string{"balance": fmt.Sprint(balance), "required": fmt.Sprint(required)}}
 }
 
 func PayloadTooLarge(message string) *Error {

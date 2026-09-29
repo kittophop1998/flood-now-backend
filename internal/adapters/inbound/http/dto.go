@@ -760,6 +760,16 @@ type publicConfigResponse struct {
 	GISTDAFlood bool `json:"gistda_flood"`
 	// DOHCCTV is true when the official DOH highway camera layer is enabled.
 	DOHCCTV bool `json:"doh_cctv"`
+	// LocalServices is null when local services are off.
+	LocalServices *localServicesConfigResponse `json:"local_services"`
+}
+
+type localServicesConfigResponse struct {
+	CreditEnabled         bool `json:"credit_enabled"`
+	TopupEnabled          bool `json:"topup_enabled"`
+	MatchFee              int  `json:"match_fee"`
+	ConfirmTimeoutSeconds int  `json:"confirm_timeout_seconds"`
+	RefundGraceSeconds    int  `json:"refund_grace_seconds"`
 }
 
 // --- Official GISTDA flood layer ---

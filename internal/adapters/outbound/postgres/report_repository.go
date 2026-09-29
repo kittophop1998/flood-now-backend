@@ -665,13 +665,16 @@ func (repo *ReportRepository) ImageCleanupCandidates(ctx context.Context, cutoff
 }
 
 // ImageKeyReferenced reports whether any report still carries key. Community
-// events take their photo from the same public presign (a reports/ key), so
-// a key an event still uses counts as referenced too.
+// events, service-provider logos and service-request photos take their image
+// from the same public presign (a reports/ key), so a key any of them still
+// uses counts as referenced too.
 func (repo *ReportRepository) ImageKeyReferenced(ctx context.Context, key string) (bool, error) {
 	var referenced bool
 	if err := repo.db.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM reports WHERE image_key = $1)
-			OR EXISTS(SELECT 1 FROM community_events WHERE image_key = $1)`, key,
+			OR EXISTS(SELECT 1 FROM community_events WHERE image_key = $1)
+			OR EXISTS(SELECT 1 FROM service_providers WHERE logo_key = $1)
+			OR EXISTS(SELECT 1 FROM service_requests WHERE image_key = $1)`, key,
 	).Scan(&referenced); err != nil {
 		return false, fmt.Errorf("check report image reference: %w", err)
 	}
